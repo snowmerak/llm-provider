@@ -220,6 +220,10 @@ go test ./gateway -run TestIntegration -v
 $env:GATEWAY_GROK_INTEGRATION = "1"
 $env:GROK_INTEGRATION_MODEL = "grok-4.5"
 go test ./gateway -run TestIntegrationGrokFromConfigThroughOpenAIProvider -v
+
+$env:GATEWAY_OPENROUTER_INTEGRATION = "1"
+$env:OPENROUTER_INTEGRATION_MODEL = "openai/gpt-4.1-mini"
+go test ./gateway -run TestIntegrationOpenRouterFromConfigThroughOpenAIProvider -v
 ```
 
 구현은 [OpenAI Chat Completions API](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create), [Prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching), [Function calling](https://developers.openai.com/api/docs/guides/function-calling), [Codex App Server](https://developers.openai.com/codex/app-server/), [OpenRouter prompt caching](https://openrouter.ai/docs/guides/best-practices/prompt-caching), [OpenRouter response caching](https://openrouter.ai/docs/guides/features/response-caching), [xAI prompt caching](https://docs.x.ai/developers/advanced-api-usage/prompt-caching) 문서를 기준으로 합니다.

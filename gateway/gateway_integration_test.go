@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -299,4 +300,153 @@ func TestIntegrationGrokFromConfigThroughOpenAIProvider(t *testing.T) {
 	}
 	t.Logf("Grok cache tokens: read=%d prompt=%d",
 		second.Usage.PromptDetails.CachedTokens, second.Usage.PromptTokens)
+}
+
+func TestIntegrationOpenRouterFromConfigThroughOpenAIProvider(t *testing.T) {
+	if os.Getenv("GATEWAY_OPENROUTER_INTEGRATION") == "" {
+		t.Skip("set GATEWAY_OPENROUTER_INTEGRATION=1 to test the configured OpenRouter provider")
+	}
+	configPath := os.Getenv("GATEWAY_CONFIG_PATH")
+	if configPath == "" {
+		configPath = "../llm-provider.json"
+	}
+	config, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := os.Getenv("OPENROUTER_INTEGRATION_MODEL")
+	if model == "" {
+		model = "openai/gpt-4.1-mini"
+	}
+	found := false
+	for index := range config.Providers {
+		if config.Providers[index].ID != "openrouter" {
+			continue
+		}
+		config.Providers[index].Enabled = true
+		config.Providers[index].Models = []string{model}
+		found = true
+	}
+	if !found {
+		t.Fatal("llm-provider.json has no openrouter provider")
+	}
+
+	gateway, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gateway.Close()
+	server := httptest.NewServer(gateway.Handler())
+	defer server.Close()
+	client := llmprovider.New(openaiprovider.New(openaiprovider.WithBaseURL(server.URL + "/v1")))
+	defer client.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	request := llmprovider.ChatRequest{
+		Model: "openrouter/" + model,
+		Messages: []llmprovider.Message{{
+			Role:    llmprovider.RoleUser,
+			Content: "Call lookup_openrouter_value with key demo. Do not answer before calling it.",
+		}},
+		Tools: []llmprovider.Tool{{
+			Type: llmprovider.ToolTypeFunction,
+			Function: llmprovider.FunctionDefinition{
+				Name: "lookup_openrouter_value", Description: "Returns a test value.",
+				Parameters: map[string]any{
+					"type": "object", "properties": map[string]any{"key": map[string]any{"type": "string"}},
+					"required": []string{"key"}, "additionalProperties": false,
+				},
+			},
+		}},
+		ToolChoice: llmprovider.NamedToolChoice("lookup_openrouter_value"),
+		Extra:      map[string]any{"session_id": "llm-provider-openrouter-tool-731"},
+	}
+	first, err := client.Chat(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Choices) == 0 || len(first.Choices[0].Message.ToolCalls) == 0 {
+		t.Fatalf("OpenRouter returned no tool call: %#v", first)
+	}
+	call := first.Choices[0].Message.ToolCalls[0]
+	if call.Function.Name != "lookup_openrouter_value" {
+		t.Fatalf("OpenRouter tool call = %#v", call)
+	}
+	request.ToolChoice = llmprovider.ToolChoiceAuto
+	request.Messages = append(request.Messages, first.Choices[0].Message, llmprovider.Message{
+		Role: llmprovider.RoleTool, ToolCallID: call.ID,
+		Content: `{"value":"OPENROUTER_TOOL_OK_731"}`,
+	})
+	toolFinal, err := client.Chat(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(toolFinal.Choices) == 0 ||
+		!strings.Contains(toolFinal.Choices[0].Message.Content, "OPENROUTER_TOOL_OK_731") {
+		t.Fatalf("OpenRouter did not use the tool result: %#v", toolFinal)
+	}
+
+	promptCacheSession := fmt.Sprintf("llm-provider-openrouter-prompt-%d", time.Now().UnixNano())
+	promptCacheRequest := llmprovider.ChatRequest{
+		Model: "openrouter/" + model,
+		Messages: []llmprovider.Message{
+			{
+				Role:    llmprovider.RoleSystem,
+				Content: strings.Repeat("Stable OpenRouter provider prompt-cache reference context. ", 256),
+			},
+			{Role: llmprovider.RoleUser, Content: "Reply with exactly PROMPT_CACHE_TURN_ONE."},
+		},
+		Extra: map[string]any{"session_id": promptCacheSession},
+	}
+	promptFirst, err := client.Chat(ctx, promptCacheRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	promptCacheRequest.Messages = append(
+		promptCacheRequest.Messages,
+		promptFirst.Choices[0].Message,
+		llmprovider.Message{Role: llmprovider.RoleUser, Content: "Reply with exactly PROMPT_CACHE_TURN_TWO."},
+	)
+	promptSecond, err := client.Chat(ctx, promptCacheRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if promptSecond.Usage.PromptDetails == nil || promptSecond.Usage.PromptDetails.CachedTokens <= 0 {
+		t.Fatalf("OpenRouter provider prompt cache did not report a hit: %#v", promptSecond.Usage)
+	}
+	t.Logf("OpenRouter provider cache tokens: read=%d prompt=%d",
+		promptSecond.Usage.PromptDetails.CachedTokens, promptSecond.Usage.PromptTokens)
+
+	cacheMarker := fmt.Sprintf("OPENROUTER_RESPONSE_CACHE_%d", time.Now().UnixNano())
+	cacheRequest := llmprovider.ChatRequest{
+		Model: "openrouter/" + model,
+		Messages: []llmprovider.Message{{
+			Role: llmprovider.RoleUser, Content: "Reply with exactly " + cacheMarker,
+		}},
+		Headers: http.Header{
+			"X-OpenRouter-Cache":     []string{"true"},
+			"X-OpenRouter-Cache-TTL": []string{"600"},
+		},
+	}
+	miss, err := client.Chat(ctx, cacheRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hit, err := client.Chat(ctx, cacheRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status := miss.Headers.Get("X-OpenRouter-Cache-Status"); status != "MISS" {
+		t.Fatalf("first OpenRouter response cache status = %q", status)
+	}
+	if status := hit.Headers.Get("X-OpenRouter-Cache-Status"); status != "HIT" {
+		t.Fatalf("second OpenRouter response cache status = %q", status)
+	}
+	if hit.Usage.TotalTokens != 0 {
+		t.Fatalf("cached OpenRouter response usage = %#v", hit.Usage)
+	}
+	t.Logf("OpenRouter response cache: first=%s second=%s age=%s ttl=%s",
+		miss.Headers.Get("X-OpenRouter-Cache-Status"), hit.Headers.Get("X-OpenRouter-Cache-Status"),
+		hit.Headers.Get("X-OpenRouter-Cache-Age"), hit.Headers.Get("X-OpenRouter-Cache-TTL"))
 }
