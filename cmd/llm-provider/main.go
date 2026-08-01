@@ -34,7 +34,7 @@ func run() error {
 		config.Listen = *listenOverride
 	}
 	if config.Listen == "" {
-		config.Listen = "127.0.0.1:8080"
+		config.Listen = "127.0.0.1:18181"
 	}
 	router, err := gateway.New(config)
 	if err != nil {
