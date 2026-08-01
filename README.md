@@ -37,8 +37,22 @@ Copy-Item llm-provider.example.json llm-provider.json
 $env:OPENROUTER_API_KEY = "..."
 $env:CLAUDE_API_KEY = "..."
 $env:XAI_API_KEY = "..."
-go run ./cmd/llm-provider -config ./llm-provider.json
+go run ./cmd/llm-provider -f ./llm-provider.json
 ```
+
+`-config` remains available as an alias for `-f`. The process watches the
+selected configuration file with
+[`fsnotify`](https://github.com/fsnotify/fsnotify). Changes are debounced and a
+replacement Gateway is built and model-cache-warmed before it starts receiving
+traffic. Invalid configurations are logged and ignored, leaving the current
+Gateway running. In-flight requests continue on the previous Gateway until
+they finish.
+
+The containing directory is watched rather than only the file, so atomic saves
+performed by editors are detected. Provider and model-cache settings reload at
+runtime. A changed `listen` address is logged but requires a process restart;
+the `-listen` command-line override continues to take precedence on every
+reload.
 
 ### Model listing and metadata
 

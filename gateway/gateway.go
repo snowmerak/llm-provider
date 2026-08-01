@@ -64,6 +64,15 @@ type Gateway struct {
 }
 
 func New(config Config) (*Gateway, error) {
+	return NewContext(context.Background(), config)
+}
+
+// NewContext constructs a Gateway and warms its model cache. Cancelling ctx
+// aborts startup discovery and closes any providers that were already built.
+func NewContext(ctx context.Context, config Config) (*Gateway, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	refreshInterval, refreshTimeout, err := modelCacheSettings(config)
 	if err != nil {
 		return nil, err
@@ -112,9 +121,13 @@ func New(config Config) (*Gateway, error) {
 	// Warm the cache before the Gateway is returned so the first /v1/models
 	// request never waits on backend discovery. Individual provider failures
 	// produce an empty cache entry and do not prevent startup.
-	warmupContext, cancelWarmup := context.WithTimeout(context.Background(), gateway.modelRefreshTimeout)
+	warmupContext, cancelWarmup := context.WithTimeout(ctx, gateway.modelRefreshTimeout)
 	gateway.refreshModelCache(warmupContext)
 	cancelWarmup()
+	if err := ctx.Err(); err != nil {
+		_ = gateway.Close()
+		return nil, fmt.Errorf("gateway: initialize: %w", err)
+	}
 
 	cacheContext, cancelCache := context.WithCancel(context.Background())
 	gateway.cacheCancel = cancelCache
