@@ -73,7 +73,13 @@
       "prefix": "grok",
       "enabled": false,
       "base_url": "https://api.x.ai/v1",
-      "api_key_env": "XAI_API_KEY"
+      "api_key_env": "XAI_API_KEY",
+      "model_metadata": {
+        "grok-4.5": {
+          "context_length": 200000,
+          "max_output_tokens": 128000
+        }
+      }
     }
   ]
 }
