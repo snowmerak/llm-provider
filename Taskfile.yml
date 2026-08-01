@@ -19,6 +19,16 @@ tasks:
     cmds:
       - go vet ./...
 
+  build:
+    desc: Build LLM Provider
+    cmds:
+      - go build -o llm-provider ./cmd/llm-provider/.
+
+  install:
+    desc: Install LLM Provider
+    cmds:
+      - go install ./cmd/llm-provider/.
+
   regression:
     desc: Run local tests, vet, and every external cache regression sequentially
     cmds:
