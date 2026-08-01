@@ -216,7 +216,63 @@ example, the existing `local` provider can continue to point at
 expose an embeddings capability through this package, so selecting those
 prefixes returns an explicit unsupported-provider error.
 
-## Caching and provider metadata
+## Caching
+
+The repository has three distinct cache layers:
+
+| Layer | Owner | What is cached | How to observe it |
+|---|---|---|---|
+| Model catalog | Gateway | Results used by `GET /v1/models` and model detail | Models appear immediately without a backend call |
+| Prompt cache | Selected model provider | Reusable input-prefix computation | `usage.prompt_tokens_details.cached_tokens` and `cache_write_tokens` |
+| Response cache | OpenRouter | A complete response for an identical request | `X-OpenRouter-Cache-Status`, `Age`, and `TTL` |
+
+The Gateway does not store generated Chat/Responses bodies or embedding
+vectors. Prompt caching is provider-managed: the Gateway preserves request
+extensions and normalizes the usage data needed to measure it.
+
+### Prompt-cache checklist
+
+1. Put stable system/developer instructions, examples, tools, schemas, and
+   reusable documents first.
+2. Put the current user input, timestamps, IDs, and other changing data after
+   the reusable prefix.
+3. Reuse a stable key for requests with the same prefix. Include a prompt or
+   schema version in the key, such as `tenant-a:support-agent:v3`.
+4. Warm the cache once, then append the next turn without rewriting the earlier
+   prefix.
+5. Inspect `cached_tokens` and `cache_write_tokens`; latency alone does not
+   prove a cache hit.
+
+For OpenAI GPT-5.6 and later, a cacheable prefix must be at least 1,024 tokens.
+Use a stable `prompt_cache_key` and place an explicit
+`prompt_cache_breakpoint` after reusable content when the suffix changes.
+Setting `prompt_cache_options.mode` to `explicit` disables the implicit latest
+message breakpoint, avoiding cache writes for a changing suffix. See the
+[OpenAI prompt caching guide](https://developers.openai.com/api/docs/guides/prompt-caching)
+for current provider semantics.
+
+### Provider recipes
+
+| Provider | Reuse mechanism | Keep stable | Hit signal |
+|---|---|---|---|
+| OpenAI-compatible GPT-5.6+ | `prompt_cache_key`, `prompt_cache_options`, `prompt_cache_breakpoint` | Prefix, cache key, tools and schema order | `cached_tokens`, `cache_write_tokens` |
+| Claude | `cache_control` on a stable content block | Marked block and preceding content | Normalized cached/write tokens |
+| Codex App Server | Provider-managed; retain `conversation_id` | Thread, history, tool calls and results | Normalized cached/write tokens |
+| Grok | Stable `X-Grok-Conv-Id` | Header, prefix, system message and tools | `cached_tokens` |
+| OpenRouter prompt cache | Stable `session_id` or `X-Session-Id` | Session key and prompt prefix | `cached_tokens` |
+| OpenRouter response cache | `X-OpenRouter-Cache: true` | The complete request | `MISS`, then `HIT` response header |
+
+Use request-scoped cache options when a provider handles mixed endpoint types.
+Provider-level `headers` and `body` values are broad defaults and may be
+inappropriate for `/embeddings` or backends that do not support the same cache
+extensions.
+
+Repository agents can follow the
+[`use-llm-provider-caching`](./.agents/skills/use-llm-provider-caching/SKILL.md)
+workflow when adding cache configuration, diagnosing misses, or running the
+paid/external regression tasks.
+
+### Forwarded cache fields
 
 The following request headers are in the Gateway's default forwarding
 allowlist. They are forwarded only to the selected HTTP provider:

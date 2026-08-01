@@ -1,0 +1,4 @@
+interface:
+  display_name: "Use LLM Provider Caching"
+  short_description: "Configure and verify provider cache reuse"
+  default_prompt: "Use $use-llm-provider-caching to configure and verify cache reuse for this gateway."
