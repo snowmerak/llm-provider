@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	llmprovider "github.com/snowmerak/llm-provider"
 	"github.com/snowmerak/llm-provider/providers/anthropic"
@@ -33,6 +34,13 @@ var defaultResponseHeaders = []string{
 	"Request-Id",
 }
 
+const (
+	defaultModelCacheRefreshInterval = 15 * time.Minute
+	defaultModelCacheRefreshTimeout  = 10 * time.Second
+	minModelCacheRefreshInterval     = 5 * time.Minute
+	maxModelCacheRefreshInterval     = 30 * time.Minute
+)
+
 type route struct {
 	id                     string
 	prefix                 string
@@ -41,16 +49,30 @@ type route struct {
 	modelMetadata          map[string]llmprovider.ModelMetadata
 	forwardHeaders         map[string]struct{}
 	forwardResponseHeaders map[string]struct{}
+	modelMu                sync.RWMutex
+	cachedModels           []llmprovider.Model
 }
 
 type Gateway struct {
-	routes map[string]*route
-	order  []*route
-	once   sync.Once
+	routes               map[string]*route
+	order                []*route
+	modelRefreshInterval time.Duration
+	modelRefreshTimeout  time.Duration
+	cacheCancel          context.CancelFunc
+	cacheWG              sync.WaitGroup
+	once                 sync.Once
 }
 
 func New(config Config) (*Gateway, error) {
-	gateway := &Gateway{routes: make(map[string]*route)}
+	refreshInterval, refreshTimeout, err := modelCacheSettings(config)
+	if err != nil {
+		return nil, err
+	}
+	gateway := &Gateway{
+		routes:               make(map[string]*route),
+		modelRefreshInterval: refreshInterval,
+		modelRefreshTimeout:  refreshTimeout,
+	}
 	for _, providerConfig := range config.Providers {
 		if err := providerConfig.validate(); err != nil {
 			_ = gateway.Close()
@@ -86,7 +108,46 @@ func New(config Config) (*Gateway, error) {
 		return nil, errors.New("gateway: no providers are enabled")
 	}
 	sort.Slice(gateway.order, func(i, j int) bool { return gateway.order[i].prefix < gateway.order[j].prefix })
+
+	// Warm the cache before the Gateway is returned so the first /v1/models
+	// request never waits on backend discovery. Individual provider failures
+	// produce an empty cache entry and do not prevent startup.
+	warmupContext, cancelWarmup := context.WithTimeout(context.Background(), gateway.modelRefreshTimeout)
+	gateway.refreshModelCache(warmupContext)
+	cancelWarmup()
+
+	cacheContext, cancelCache := context.WithCancel(context.Background())
+	gateway.cacheCancel = cancelCache
+	gateway.cacheWG.Add(1)
+	go gateway.refreshModelCacheLoop(cacheContext)
 	return gateway, nil
+}
+
+func modelCacheSettings(config Config) (time.Duration, time.Duration, error) {
+	refreshInterval := defaultModelCacheRefreshInterval
+	if config.ModelCacheRefreshInterval != "" {
+		parsed, err := time.ParseDuration(config.ModelCacheRefreshInterval)
+		if err != nil {
+			return 0, 0, fmt.Errorf("gateway: parse model_cache_refresh_interval: %w", err)
+		}
+		refreshInterval = parsed
+	}
+	if refreshInterval < minModelCacheRefreshInterval || refreshInterval > maxModelCacheRefreshInterval {
+		return 0, 0, fmt.Errorf("gateway: model_cache_refresh_interval must be between %s and %s", minModelCacheRefreshInterval, maxModelCacheRefreshInterval)
+	}
+
+	refreshTimeout := defaultModelCacheRefreshTimeout
+	if config.ModelCacheRefreshTimeout != "" {
+		parsed, err := time.ParseDuration(config.ModelCacheRefreshTimeout)
+		if err != nil {
+			return 0, 0, fmt.Errorf("gateway: parse model_cache_refresh_timeout: %w", err)
+		}
+		refreshTimeout = parsed
+	}
+	if refreshTimeout <= 0 {
+		return 0, 0, errors.New("gateway: model_cache_refresh_timeout must be positive")
+	}
+	return refreshInterval, refreshTimeout, nil
 }
 
 func buildProvider(config ProviderConfig) (llmprovider.Provider, error) {
@@ -187,11 +248,7 @@ func buildProvider(config ProviderConfig) (llmprovider.Provider, error) {
 func (g *Gateway) Models(ctx context.Context) ([]llmprovider.Model, error) {
 	models := make([]llmprovider.Model, 0)
 	for _, route := range g.order {
-		listed, err := g.routeModels(ctx, route)
-		if err != nil {
-			return nil, err
-		}
-		models = append(models, listed...)
+		models = append(models, route.modelsFromCache()...)
 	}
 	return models, nil
 }
@@ -206,10 +263,7 @@ func (g *Gateway) Model(ctx context.Context, id string) (llmprovider.Model, erro
 	if route == nil {
 		return llmprovider.Model{}, fmt.Errorf("gateway: model %q uses unknown provider prefix %q", id, prefix)
 	}
-	models, err := g.routeModels(ctx, route)
-	if err != nil {
-		return llmprovider.Model{}, err
-	}
+	models := route.modelsFromCache()
 	for _, model := range models {
 		if model.ID == id {
 			return model, nil
@@ -218,7 +272,7 @@ func (g *Gateway) Model(ctx context.Context, id string) (llmprovider.Model, erro
 	return llmprovider.Model{}, fmt.Errorf("gateway: model %q was not found", id)
 }
 
-func (g *Gateway) routeModels(ctx context.Context, route *route) ([]llmprovider.Model, error) {
+func (g *Gateway) discoverRouteModels(ctx context.Context, route *route) ([]llmprovider.Model, error) {
 	lister, canList := route.provider.(llmprovider.ModelLister)
 	if len(route.models) == 0 {
 		if !canList {
@@ -254,6 +308,50 @@ func (g *Gateway) routeModels(ctx context.Context, route *route) ([]llmprovider.
 	}
 	applyModelOverrides(route, listed)
 	return prefixedModels(route, listed), nil
+}
+
+func (g *Gateway) refreshModelCache(ctx context.Context) {
+	var wait sync.WaitGroup
+	for _, routeEntry := range g.order {
+		wait.Add(1)
+		go func(routeEntry *route) {
+			defer wait.Done()
+			models, err := g.discoverRouteModels(ctx, routeEntry)
+			if err != nil {
+				models = nil
+			}
+			routeEntry.storeModels(models)
+		}(routeEntry)
+	}
+	wait.Wait()
+}
+
+func (g *Gateway) refreshModelCacheLoop(ctx context.Context) {
+	defer g.cacheWG.Done()
+	ticker := time.NewTicker(g.modelRefreshInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			refreshContext, cancel := context.WithTimeout(ctx, g.modelRefreshTimeout)
+			g.refreshModelCache(refreshContext)
+			cancel()
+		}
+	}
+}
+
+func (r *route) storeModels(models []llmprovider.Model) {
+	r.modelMu.Lock()
+	defer r.modelMu.Unlock()
+	r.cachedModels = append(r.cachedModels[:0], models...)
+}
+
+func (r *route) modelsFromCache() []llmprovider.Model {
+	r.modelMu.RLock()
+	defer r.modelMu.RUnlock()
+	return append([]llmprovider.Model(nil), r.cachedModels...)
 }
 
 func applyModelOverrides(route *route, models []llmprovider.Model) {
@@ -315,6 +413,10 @@ func (g *Gateway) resolve(model string) (*route, string, error) {
 func (g *Gateway) Close() error {
 	var result error
 	g.once.Do(func() {
+		if g.cacheCancel != nil {
+			g.cacheCancel()
+			g.cacheWG.Wait()
+		}
 		for _, route := range g.order {
 			result = errors.Join(result, route.provider.Close())
 		}

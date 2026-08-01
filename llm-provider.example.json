@@ -1,5 +1,7 @@
 {
   "listen": "127.0.0.1:18181",
+  "model_cache_refresh_interval": "15m",
+  "model_cache_refresh_timeout": "10s",
   "providers": [
     {
       "id": "codex",

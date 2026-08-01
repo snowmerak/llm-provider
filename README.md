@@ -48,6 +48,23 @@ List every model exposed by the enabled providers:
 curl http://127.0.0.1:8080/v1/models
 ```
 
+The Gateway discovers model lists concurrently during startup and serves model
+list and detail requests from an in-memory cache. It refreshes the cache every
+15 minutes by default, so those endpoints do not wait for backend network
+calls. The interval can be set from 5 to 30 minutes, and each refresh has a
+configurable timeout:
+
+```json
+{
+  "model_cache_refresh_interval": "15m",
+  "model_cache_refresh_timeout": "10s"
+}
+```
+
+If discovery fails for a provider without a static model list, that provider's
+models are omitted from the cache while models from healthy providers remain
+available. A later successful refresh adds the provider back automatically.
+
 When a provider has a `models` array, that array is the authoritative allowlist.
 The Gateway still attempts model discovery to enrich allowlisted entries with
 upstream metadata, but a discovery failure does not make a static allowlist

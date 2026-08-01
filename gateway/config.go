@@ -14,8 +14,10 @@ import (
 const defaultOpenRouterBaseURL = "https://openrouter.ai/api/v1"
 
 type Config struct {
-	Listen    string           `json:"listen"`
-	Providers []ProviderConfig `json:"providers"`
+	Listen                    string           `json:"listen"`
+	ModelCacheRefreshInterval string           `json:"model_cache_refresh_interval,omitempty"`
+	ModelCacheRefreshTimeout  string           `json:"model_cache_refresh_timeout,omitempty"`
+	Providers                 []ProviderConfig `json:"providers"`
 }
 
 type ProviderConfig struct {
@@ -67,6 +69,8 @@ func LoadConfig(path string) (Config, error) {
 
 func (c *Config) expandEnvironment() {
 	c.Listen = os.ExpandEnv(c.Listen)
+	c.ModelCacheRefreshInterval = os.ExpandEnv(c.ModelCacheRefreshInterval)
+	c.ModelCacheRefreshTimeout = os.ExpandEnv(c.ModelCacheRefreshTimeout)
 	for index := range c.Providers {
 		provider := &c.Providers[index]
 		provider.BaseURL = os.ExpandEnv(provider.BaseURL)

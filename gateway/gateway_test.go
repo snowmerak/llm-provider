@@ -2,16 +2,184 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	llmprovider "github.com/snowmerak/llm-provider"
 )
+
+func TestModelCacheWarmsAtStartupAndServesReadsWithoutDiscovery(t *testing.T) {
+	var modelRequests atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/v1/models" {
+			http.NotFound(writer, request)
+			return
+		}
+		modelRequests.Add(1)
+		_, _ = io.WriteString(writer, `{"object":"list","data":[{"id":"cached-model"}]}`)
+	}))
+	defer upstream.Close()
+
+	gateway, err := New(Config{Providers: []ProviderConfig{{
+		ID: "local", Type: "openai-compatible", Enabled: true, BaseURL: upstream.URL + "/v1",
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gateway.Close()
+	if got := modelRequests.Load(); got != 1 {
+		t.Fatalf("startup model requests = %d, want 1", got)
+	}
+
+	for range 3 {
+		models, err := gateway.Models(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(models) != 1 || models[0].ID != "local/cached-model" {
+			t.Fatalf("models = %#v", models)
+		}
+	}
+	if _, err := gateway.Model(t.Context(), "local/cached-model"); err != nil {
+		t.Fatal(err)
+	}
+	if got := modelRequests.Load(); got != 1 {
+		t.Fatalf("model requests after cache reads = %d, want 1", got)
+	}
+}
+
+func TestUnavailableDynamicProviderIsOmitted(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = io.WriteString(writer, `{"object":"list","data":[{"id":"healthy-model"}]}`)
+	}))
+	defer upstream.Close()
+	deadUpstream := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	deadURL := deadUpstream.URL
+	deadUpstream.Close()
+
+	gateway, err := New(Config{
+		ModelCacheRefreshTimeout: "1s",
+		Providers: []ProviderConfig{
+			{ID: "dead", Type: "openai-compatible", Enabled: true, BaseURL: deadURL + "/v1"},
+			{ID: "healthy", Type: "openai-compatible", Enabled: true, BaseURL: upstream.URL + "/v1"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gateway.Close()
+
+	models, err := gateway.Models(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 1 || models[0].ID != "healthy/healthy-model" {
+		t.Fatalf("models = %#v", models)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	response := httptest.NewRecorder()
+	gateway.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), `"error"`) {
+		t.Fatalf("model endpoint status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestFailedRefreshRemovesDynamicProviderFromCache(t *testing.T) {
+	var unavailable atomic.Bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if unavailable.Load() {
+			http.Error(writer, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = io.WriteString(writer, `{"object":"list","data":[{"id":"temporary-model"}]}`)
+	}))
+	defer upstream.Close()
+
+	gateway, err := New(Config{Providers: []ProviderConfig{{
+		ID: "local", Type: "openai-compatible", Enabled: true, BaseURL: upstream.URL + "/v1",
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gateway.Close()
+
+	unavailable.Store(true)
+	gateway.refreshModelCache(t.Context())
+	models, err := gateway.Models(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 0 {
+		t.Fatalf("models after failed refresh = %#v", models)
+	}
+}
+
+func TestModelCacheRefreshLoopRefreshesPeriodically(t *testing.T) {
+	var modelRequests atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		modelRequests.Add(1)
+		_, _ = io.WriteString(writer, `{"object":"list","data":[{"id":"periodic-model"}]}`)
+	}))
+	defer upstream.Close()
+	provider, err := buildProvider(ProviderConfig{
+		ID: "local", Type: "openai-compatible", Enabled: true, BaseURL: upstream.URL + "/v1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	routeEntry := &route{id: "local", prefix: "local", provider: provider}
+	gateway := &Gateway{
+		order: []*route{routeEntry}, modelRefreshInterval: 10 * time.Millisecond,
+		modelRefreshTimeout: time.Second,
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	gateway.cacheWG.Add(1)
+	go gateway.refreshModelCacheLoop(ctx)
+	t.Cleanup(func() {
+		cancel()
+		gateway.cacheWG.Wait()
+		_ = provider.Close()
+	})
+
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	poll := time.NewTicker(5 * time.Millisecond)
+	defer poll.Stop()
+	for {
+		select {
+		case <-deadline.C:
+			t.Fatalf("periodic model refresh did not run; requests = %d", modelRequests.Load())
+		case <-poll.C:
+			models := routeEntry.modelsFromCache()
+			if len(models) == 1 && models[0].ID == "local/periodic-model" {
+				return
+			}
+		}
+	}
+}
+
+func TestModelCacheRefreshIntervalBounds(t *testing.T) {
+	for _, interval := range []string{"4m59s", "30m1s"} {
+		if _, _, err := modelCacheSettings(Config{ModelCacheRefreshInterval: interval}); err == nil {
+			t.Fatalf("model cache interval %q was accepted", interval)
+		}
+	}
+	interval, timeout, err := modelCacheSettings(Config{ModelCacheRefreshInterval: "5m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if interval != 5*time.Minute || timeout != defaultModelCacheRefreshTimeout {
+		t.Fatalf("model cache settings = %s, %s", interval, timeout)
+	}
+}
 
 func TestModelsAndChatRouting(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
