@@ -422,3 +422,199 @@ func TestRejectsUnknownPrefix(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
 }
+
+func TestLocalEmbeddingModelDiscoveryAndRouting(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/v1/models":
+			_, _ = io.WriteString(writer, `{"object":"list","data":[{"id":"chat-model"},{"id":"text-embedding-local"}]}`)
+		case "/v1/embeddings":
+			var body map[string]any
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body["model"] != "text-embedding-local" || body["encoding_format"] != "base64" || body["dimensions"] != float64(768) {
+				t.Errorf("embedding body = %#v", body)
+			}
+			input, ok := body["input"].([]any)
+			if !ok || len(input) != 2 || input[0] != "hello" {
+				t.Errorf("embedding input = %#v", body["input"])
+			}
+			_, _ = io.WriteString(writer, `{"object":"list","data":[{"object":"embedding","embedding":"AAAA","index":0}],"model":"text-embedding-local","usage":{"prompt_tokens":2,"total_tokens":2},"backend_extension":{"cached":true}}`)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer upstream.Close()
+
+	gateway, err := New(Config{Providers: []ProviderConfig{{
+		ID: "lmstudio", Type: "openai-compatible", Prefix: "local", Enabled: true,
+		BaseURL: upstream.URL + "/v1",
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gateway.Close()
+	server := httptest.NewServer(gateway.Handler())
+	defer server.Close()
+
+	modelResponse, err := http.Get(server.URL + "/v1/models")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer modelResponse.Body.Close()
+	var listed struct {
+		Data []llmprovider.Model `json:"data"`
+	}
+	if err := json.NewDecoder(modelResponse.Body).Decode(&listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Data) != 2 || listed.Data[1].ID != "local/text-embedding-local" {
+		t.Fatalf("models = %#v", listed.Data)
+	}
+
+	embeddingResponse, err := http.Post(server.URL+"/v1/embeddings", "application/json", strings.NewReader(
+		`{"model":"local/text-embedding-local","input":["hello","world"],"encoding_format":"base64","dimensions":768}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer embeddingResponse.Body.Close()
+	var result map[string]any
+	if err := json.NewDecoder(embeddingResponse.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if embeddingResponse.StatusCode != http.StatusOK || result["model"] != "local/text-embedding-local" {
+		t.Fatalf("status=%d result=%#v", embeddingResponse.StatusCode, result)
+	}
+	if result["backend_extension"].(map[string]any)["cached"] != true {
+		t.Fatalf("extension was not preserved: %#v", result)
+	}
+}
+
+func TestNativeResponsesRoutingAndChatWirePreservation(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/v1/models":
+			_, _ = io.WriteString(writer, `{"data":[{"id":"model"}]}`)
+		case "/v1/responses":
+			var body map[string]any
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body["model"] != "model" || body["input"] != "hello" {
+				t.Errorf("responses body = %#v", body)
+			}
+			if body["stream"] == true {
+				writer.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(writer, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"model\",\"status\":\"in_progress\"}}\n\n")
+				_, _ = io.WriteString(writer, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"model\",\"status\":\"completed\"}}\n\n")
+				return
+			}
+			_, _ = io.WriteString(writer, `{"id":"resp_1","object":"response","model":"model","status":"completed","output":[],"vendor_field":"kept"}`)
+		case "/v1/chat/completions":
+			_, _ = io.WriteString(writer, `{"id":"chat_1","object":"chat.completion","model":"model","choices":[{"index":0,"message":{"role":"assistant","content":"ok","refusal":null,"annotations":[{"type":"url_citation"}]},"finish_reason":"stop","logprobs":{"content":[]}}],"system_fingerprint":"fp_test","service_tier":"default"}`)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer upstream.Close()
+	gateway, err := New(Config{Providers: []ProviderConfig{{
+		ID: "local", Type: "openai-compatible", Enabled: true, BaseURL: upstream.URL + "/v1",
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gateway.Close()
+	server := httptest.NewServer(gateway.Handler())
+	defer server.Close()
+
+	response, err := http.Post(server.URL+"/v1/responses", "application/json", strings.NewReader(`{"model":"local/model","input":"hello"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(data), `"model":"local/model"`) || !strings.Contains(string(data), `"vendor_field":"kept"`) {
+		t.Fatalf("responses status=%d body=%s", response.StatusCode, data)
+	}
+
+	streamResponse, err := http.Post(server.URL+"/v1/responses", "application/json", strings.NewReader(`{"model":"local/model","input":"hello","stream":true}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	streamData, _ := io.ReadAll(streamResponse.Body)
+	_ = streamResponse.Body.Close()
+	if !strings.Contains(string(streamData), "event: response.created") || strings.Count(string(streamData), `"model":"local/model"`) != 2 {
+		t.Fatalf("responses stream = %s", streamData)
+	}
+
+	chatResponse, err := http.Post(server.URL+"/v1/chat/completions", "application/json", strings.NewReader(`{"model":"local/model","messages":[{"role":"user","content":"hello"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	chatData, _ := io.ReadAll(chatResponse.Body)
+	_ = chatResponse.Body.Close()
+	for _, expected := range []string{`"system_fingerprint":"fp_test"`, `"service_tier":"default"`, `"annotations"`, `"logprobs"`, `"model":"local/model"`} {
+		if !strings.Contains(string(chatData), expected) {
+			t.Fatalf("chat response lost %s: %s", expected, chatData)
+		}
+	}
+}
+
+func TestResponsesChatAdapterCommonSubset(t *testing.T) {
+	decoded := responseRequest{
+		Model: "codex/model", Instructions: "be concise", Input: []any{
+			map[string]any{"role": "user", "content": []any{map[string]any{"type": "input_text", "text": "hello"}}},
+			map[string]any{"type": "function_call_output", "call_id": "call_1", "output": "done"},
+		},
+		Tools:      []map[string]any{{"type": "function", "name": "lookup", "description": "Lookup", "parameters": map[string]any{"type": "object"}}},
+		ToolChoice: map[string]any{"type": "function", "name": "lookup"},
+	}
+	chat, err := responseToChat(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chat.Messages) != 3 || chat.Messages[0].Role != llmprovider.RoleDeveloper || chat.Messages[1].Content != "hello" || chat.Messages[2].ToolCallID != "call_1" {
+		t.Fatalf("messages = %#v", chat.Messages)
+	}
+	if len(chat.Tools) != 1 || chat.Tools[0].Function.Name != "lookup" {
+		t.Fatalf("tools = %#v", chat.Tools)
+	}
+	choice := chat.ToolChoice.(map[string]any)
+	if choice["function"].(map[string]string)["name"] != "lookup" {
+		t.Fatalf("tool choice = %#v", chat.ToolChoice)
+	}
+}
+
+func TestGatewayPreservesOpenAIErrorEnvelope(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(writer, `{"error":{"message":"slow down","type":"rate_limit_error","code":"rate_limit_exceeded"}}`)
+	}))
+	defer upstream.Close()
+	gateway, err := New(Config{Providers: []ProviderConfig{{
+		ID: "local", Type: "openai-compatible", Enabled: true, BaseURL: upstream.URL, Models: []string{"model"},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gateway.Close()
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+		`{"model":"local/model","messages":[{"role":"user","content":"hello"}]}`))
+	response := httptest.NewRecorder()
+	gateway.Handler().ServeHTTP(response, request)
+	var envelope struct {
+		Error struct {
+			Message string `json:"message"`
+			Type    string `json:"type"`
+			Code    string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != http.StatusTooManyRequests || envelope.Error.Message != "slow down" ||
+		envelope.Error.Type != "rate_limit_error" || envelope.Error.Code != "rate_limit_exceeded" {
+		t.Fatalf("status=%d envelope=%#v", response.Code, envelope)
+	}
+}

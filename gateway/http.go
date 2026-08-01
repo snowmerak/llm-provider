@@ -17,6 +17,8 @@ func (g *Gateway) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/models", g.handleModels)
 	mux.HandleFunc("GET /v1/models/{id...}", g.handleModel)
 	mux.HandleFunc("POST /v1/chat/completions", g.handleChatCompletions)
+	mux.HandleFunc("POST /v1/responses", g.handleResponses)
+	mux.HandleFunc("POST /v1/embeddings", g.handleEmbeddings)
 	return mux
 }
 
@@ -58,18 +60,22 @@ func (g *Gateway) handleChatCompletions(writer http.ResponseWriter, request *htt
 	}
 	response, err := route.provider.Chat(request.Context(), chatRequest)
 	if err != nil {
-		writeError(writer, http.StatusBadGateway, err)
+		writeProviderError(writer, err)
 		return
 	}
 	response.Model = externalModel
 	copySelectedHeaders(writer.Header(), response.Headers, route.forwardResponseHeaders)
+	if _, compatible := route.provider.(llmprovider.OpenAIWireProvider); compatible && len(response.Raw) > 0 {
+		writeRawJSON(writer, http.StatusOK, rewriteTopLevelModel(response.Raw, externalModel))
+		return
+	}
 	writeJSON(writer, http.StatusOK, response)
 }
 
 func (g *Gateway) streamChat(writer http.ResponseWriter, ctx context.Context, route *route, externalModel string, request llmprovider.ChatRequest) {
 	stream, err := route.provider.ChatStream(ctx, request)
 	if err != nil {
-		writeError(writer, http.StatusBadGateway, err)
+		writeProviderError(writer, err)
 		return
 	}
 	defer stream.Close()
@@ -94,15 +100,22 @@ func (g *Gateway) streamChat(writer http.ResponseWriter, ctx context.Context, ro
 			return
 		}
 		if recvErr != nil {
-			data, _ := json.Marshal(errorEnvelope(recvErr))
+			data, _ := json.Marshal(errorEnvelope(http.StatusBadGateway, recvErr))
 			_, _ = fmt.Fprintf(writer, "data: %s\n\n", data)
 			flusher.Flush()
 			return
 		}
 		chunk.Model = externalModel
 		_, _ = io.WriteString(writer, "data: ")
-		if err := encoder.Encode(chunk); err != nil {
-			return
+		if _, compatible := route.provider.(llmprovider.OpenAIWireProvider); compatible && len(chunk.Raw) > 0 {
+			if _, err := writer.Write(rewriteTopLevelModel(chunk.Raw, externalModel)); err != nil {
+				return
+			}
+			_, _ = io.WriteString(writer, "\n")
+		} else {
+			if err := encoder.Encode(chunk); err != nil {
+				return
+			}
 		}
 		_, _ = io.WriteString(writer, "\n")
 		flusher.Flush()
@@ -163,13 +176,46 @@ func writeJSON(writer http.ResponseWriter, status int, value any) {
 	_ = json.NewEncoder(writer).Encode(value)
 }
 
-func writeError(writer http.ResponseWriter, status int, err error) {
-	writeJSON(writer, status, errorEnvelope(err))
+func writeRawJSON(writer http.ResponseWriter, status int, value []byte) {
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(status)
+	_, _ = writer.Write(value)
+	_, _ = writer.Write([]byte("\n"))
 }
 
-func errorEnvelope(err error) map[string]any {
+func writeError(writer http.ResponseWriter, status int, err error) {
+	writeJSON(writer, status, errorEnvelope(status, err))
+}
+
+func writeProviderError(writer http.ResponseWriter, err error) {
+	status := http.StatusBadGateway
+	var apiError llmprovider.APIError
+	if errors.As(err, &apiError) && apiError.HTTPStatusCode() >= 400 && apiError.HTTPStatusCode() <= 599 {
+		status = apiError.HTTPStatusCode()
+	}
+	writeError(writer, status, err)
+}
+
+func errorEnvelope(status int, err error) map[string]any {
+	errorType := "api_error"
+	message := err.Error()
+	var code any = strings.ToLower(strings.ReplaceAll(http.StatusText(status), " ", "_"))
+	if status >= 400 && status < 500 {
+		errorType = "invalid_request_error"
+	}
+	var apiError llmprovider.APIError
+	if errors.As(err, &apiError) {
+		if apiError.APIErrorMessage() != "" {
+			message = apiError.APIErrorMessage()
+		}
+		if apiError.APIErrorType() != "" {
+			errorType = apiError.APIErrorType()
+		}
+		if apiError.APIErrorCode() != nil {
+			code = apiError.APIErrorCode()
+		}
+	}
 	return map[string]any{"error": map[string]any{
-		"message": err.Error(), "type": "invalid_request_error",
-		"code": strings.ToLower(strings.ReplaceAll(http.StatusText(http.StatusBadRequest), " ", "_")),
+		"message": message, "type": errorType, "code": code,
 	}}
 }

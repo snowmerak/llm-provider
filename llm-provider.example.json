@@ -68,6 +68,20 @@
       "base_url": "http://macmini:11888/v1"
     },
     {
+      "id": "lmstudio",
+      "type": "openai-compatible",
+      "prefix": "lmstudio",
+      "enabled": false,
+      "base_url": "http://localhost:1234/v1"
+    },
+    {
+      "id": "ollama",
+      "type": "openai-compatible",
+      "prefix": "lmstudio",
+      "enabled": false,
+      "base_url": "http://localhost:11434/v1"
+    },
+    {
       "id": "grok",
       "type": "openai-compatible",
       "prefix": "grok",

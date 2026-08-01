@@ -10,6 +10,8 @@ It currently supports:
 - a local `codex app-server --listen stdio://` process
 - model listing and model metadata lookup
 - regular and SSE-streaming Chat Completions
+- native or adapted Responses API requests, including SSE streaming
+- embeddings through OpenAI-compatible backends
 - function tool calling and tool-result round trips
 - stateful Codex conversations through `conversation_id`
 - provider-specific request headers, response headers, and JSON extensions
@@ -27,6 +29,7 @@ The prefix is removed before the request is sent to the backend.
 | `claude/claude-sonnet-5` | Anthropic Messages API | `claude-sonnet-5` |
 | `openrouter/anthropic/claude-sonnet-4` | OpenRouter | `anthropic/claude-sonnet-4` |
 | `local/gpt-5.6-luna` | `http://macmini:11888/v1` | `gpt-5.6-luna` |
+| `lmstudio/text-embedding-model` | `http://localhost:1234/v1` | `text-embedding-model` |
 | `grok/grok-4.5` | xAI | `grok-4.5` |
 
 See [llm-provider.example.json](./llm-provider.example.json) for a complete
@@ -156,6 +159,62 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 Send the `conversation_id` from a Codex response with the next request to
 continue the same App Server thread. Configure `ephemeral: false` if the thread
 must be reopenable after the App Server restarts.
+
+For OpenAI-compatible providers, Chat response JSON fields and SSE chunk fields
+are preserved except that the backend model ID is replaced with its Gateway ID.
+This retains compatible extensions such as `service_tier`,
+`system_fingerprint`, annotations, refusal data, and log probabilities.
+
+### Responses
+
+```bash
+curl http://127.0.0.1:8080/v1/responses \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "codex/gpt-5.6-luna",
+    "instructions": "Always answer concisely.",
+    "input": "Describe this repository in one sentence."
+  }'
+```
+
+OpenAI-compatible providers receive `/responses` requests and SSE events
+natively, with unknown fields preserved. Providers that expose only Chat are
+adapted for the common text/message/function-tool subset. The lifecycle APIs
+for stored or background Responses are intentionally not implemented yet.
+
+### Embeddings
+
+```bash
+curl http://127.0.0.1:8080/v1/embeddings \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "lmstudio/text-embedding-model",
+    "input": ["first document", "second document"],
+    "encoding_format": "float"
+  }'
+```
+
+There is no separate embedding-model configuration. Configure the server as a
+normal OpenAI-compatible provider:
+
+```json
+{
+  "id": "lmstudio",
+  "type": "openai-compatible",
+  "prefix": "lmstudio",
+  "enabled": true,
+  "base_url": "http://localhost:1234/v1"
+}
+```
+
+If that backend returns an embedding model from `GET /models`, the normal model
+cache exposes it with the provider prefix and `/v1/embeddings` routes it back
+to that backend. The Gateway removes `lmstudio/` before the upstream call and
+restores it in the response. Use a distinct prefix for each backend URL; for
+example, the existing `local` provider can continue to point at
+`http://macmini:11888/v1`. Codex App Server and Anthropic currently do not
+expose an embeddings capability through this package, so selecting those
+prefixes returns an explicit unsupported-provider error.
 
 ## Caching and provider metadata
 
@@ -443,6 +502,8 @@ go test ./gateway -run TestIntegrationOpenRouterFromConfigThroughOpenAIProvider 
 ## References
 
 - [OpenAI Chat Completions API](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)
+- [OpenAI Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create)
+- [OpenAI Embeddings API](https://developers.openai.com/api/reference/resources/embeddings/methods/create)
 - [OpenAI Models API](https://platform.openai.com/docs/api-reference/models)
 - [OpenAI prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching)
 - [OpenAI function calling](https://developers.openai.com/api/docs/guides/function-calling)

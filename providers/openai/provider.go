@@ -128,6 +128,99 @@ func (p *Provider) ChatStream(ctx context.Context, request llmprovider.ChatReque
 	return &sseStream{body: response.Body, reader: bufio.NewReader(response.Body), headers: response.Header.Clone()}, nil
 }
 
+// Embed calls the OpenAI-compatible embeddings endpoint. Model discovery is
+// deliberately shared with chat models: an embedding model returned by
+// /models is immediately routable without a second configuration list.
+func (p *Provider) Embed(ctx context.Context, request llmprovider.EmbeddingRequest) (*llmprovider.EmbeddingResponse, error) {
+	payload := make(map[string]any, len(p.config.body)+len(request.Extra)+5)
+	for key, value := range p.config.body {
+		payload[key] = value
+	}
+	for key, value := range request.Extra {
+		payload[key] = value
+	}
+	payload["model"] = request.Model
+	payload["input"] = request.Input
+	if request.EncodingFormat != "" {
+		payload["encoding_format"] = request.EncodingFormat
+	}
+	setOptional(payload, "dimensions", request.Dimensions)
+	if request.User != "" {
+		payload["user"] = request.User
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("openai: encode embeddings request: %w", err)
+	}
+	response, err := p.doRequest(ctx, http.MethodPost, "/embeddings", bytes.NewReader(body), request.Headers, false)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	data, err := io.ReadAll(response.Body)
+	if err != nil {
+		return nil, fmt.Errorf("openai: read embeddings response: %w", err)
+	}
+	var result llmprovider.EmbeddingResponse
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, fmt.Errorf("openai: decode embeddings response: %w", err)
+	}
+	result.Raw = append(result.Raw[:0], data...)
+	result.Headers = response.Header.Clone()
+	return &result, nil
+}
+
+func (p *Provider) CreateResponse(ctx context.Context, body json.RawMessage, headers http.Header) (*llmprovider.RawResponse, error) {
+	encoded, err := p.responseBody(body, false)
+	if err != nil {
+		return nil, err
+	}
+	response, err := p.doRequest(ctx, http.MethodPost, "/responses", bytes.NewReader(encoded), headers, false)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	data, err := io.ReadAll(response.Body)
+	if err != nil {
+		return nil, fmt.Errorf("openai: read responses response: %w", err)
+	}
+	return &llmprovider.RawResponse{Body: data, Headers: response.Header.Clone()}, nil
+}
+
+func (p *Provider) CreateResponseStream(ctx context.Context, body json.RawMessage, headers http.Header) (llmprovider.ResponseStream, error) {
+	encoded, err := p.responseBody(body, true)
+	if err != nil {
+		return nil, err
+	}
+	response, err := p.doRequest(ctx, http.MethodPost, "/responses", bytes.NewReader(encoded), headers, true)
+	if err != nil {
+		return nil, err
+	}
+	return &rawSSEStream{body: response.Body, reader: bufio.NewReader(response.Body), headers: response.Header.Clone()}, nil
+}
+
+func (p *Provider) responseBody(body json.RawMessage, stream bool) ([]byte, error) {
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, fmt.Errorf("openai: decode responses request: %w", err)
+	}
+	merged := make(map[string]any, len(p.config.body)+len(payload)+1)
+	for key, value := range p.config.body {
+		merged[key] = value
+	}
+	for key, value := range payload {
+		merged[key] = value
+	}
+	merged["stream"] = stream
+	encoded, err := json.Marshal(merged)
+	if err != nil {
+		return nil, fmt.Errorf("openai: encode responses request: %w", err)
+	}
+	return encoded, nil
+}
+
+func (*Provider) OpenAICompatibleWire() {}
+
 func (p *Provider) Close() error { return nil }
 
 func (p *Provider) do(ctx context.Context, request llmprovider.ChatRequest, stream bool) (*http.Response, error) {
@@ -243,6 +336,11 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("openai: API error (HTTP %d): %s", e.StatusCode, e.Body)
 }
 
+func (e *APIError) HTTPStatusCode() int     { return e.StatusCode }
+func (e *APIError) APIErrorMessage() string { return e.Message }
+func (e *APIError) APIErrorType() string    { return e.Type }
+func (e *APIError) APIErrorCode() any       { return e.Code }
+
 func decodeAPIError(status int, data []byte) error {
 	var envelope struct {
 		Error struct {
@@ -261,6 +359,48 @@ type sseStream struct {
 	headers http.Header
 	mu      sync.Mutex
 	done    bool
+}
+
+type rawSSEStream struct {
+	body    io.ReadCloser
+	reader  *bufio.Reader
+	headers http.Header
+	mu      sync.Mutex
+	done    bool
+}
+
+func (s *rawSSEStream) ResponseHeaders() http.Header { return s.headers.Clone() }
+
+func (s *rawSSEStream) Recv() (*llmprovider.ResponseEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.done {
+		return nil, io.EOF
+	}
+	for {
+		event, data, err := readSSEEvent(s.reader)
+		if err != nil {
+			s.done = true
+			_ = s.body.Close()
+			return nil, err
+		}
+		if data == "" {
+			continue
+		}
+		if data == "[DONE]" {
+			s.done = true
+			_ = s.body.Close()
+			return nil, io.EOF
+		}
+		return &llmprovider.ResponseEvent{Event: event, Data: json.RawMessage(data)}, nil
+	}
+}
+
+func (s *rawSSEStream) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.done = true
+	return s.body.Close()
 }
 
 func (s *sseStream) ResponseHeaders() http.Header {
@@ -305,18 +445,27 @@ func (s *sseStream) Close() error {
 }
 
 func readSSEData(reader *bufio.Reader) (string, error) {
+	_, data, err := readSSEEvent(reader)
+	return data, err
+}
+
+func readSSEEvent(reader *bufio.Reader) (string, string, error) {
+	var event string
 	var lines []string
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil && len(line) == 0 {
 			if errors.Is(err, io.EOF) && len(lines) > 0 {
-				return strings.Join(lines, "\n"), nil
+				return event, strings.Join(lines, "\n"), nil
 			}
-			return "", err
+			return "", "", err
 		}
 		line = strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r")
 		if line == "" {
-			return strings.Join(lines, "\n"), nil
+			return event, strings.Join(lines, "\n"), nil
+		}
+		if strings.HasPrefix(line, "event:") {
+			event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
 		}
 		if strings.HasPrefix(line, "data:") {
 			value := strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " ")
@@ -324,12 +473,15 @@ func readSSEData(reader *bufio.Reader) (string, error) {
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				return strings.Join(lines, "\n"), nil
+				return event, strings.Join(lines, "\n"), nil
 			}
-			return "", err
+			return "", "", err
 		}
 	}
 }
 
 var _ llmprovider.Provider = (*Provider)(nil)
 var _ llmprovider.ModelLister = (*Provider)(nil)
+var _ llmprovider.Embedder = (*Provider)(nil)
+var _ llmprovider.ResponsesProvider = (*Provider)(nil)
+var _ llmprovider.OpenAIWireProvider = (*Provider)(nil)
