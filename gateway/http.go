@@ -15,6 +15,7 @@ import (
 func (g *Gateway) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/models", g.handleModels)
+	mux.HandleFunc("GET /v1/models/{id...}", g.handleModel)
 	mux.HandleFunc("POST /v1/chat/completions", g.handleChatCompletions)
 	return mux
 }
@@ -26,6 +27,15 @@ func (g *Gateway) handleModels(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	writeJSON(writer, http.StatusOK, map[string]any{"object": "list", "data": models})
+}
+
+func (g *Gateway) handleModel(writer http.ResponseWriter, request *http.Request) {
+	model, err := g.Model(request.Context(), request.PathValue("id"))
+	if err != nil {
+		writeError(writer, http.StatusNotFound, err)
+		return
+	}
+	writeJSON(writer, http.StatusOK, model)
 }
 
 func (g *Gateway) handleChatCompletions(writer http.ResponseWriter, request *http.Request) {

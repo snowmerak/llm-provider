@@ -77,8 +77,13 @@ func New(opts ...Option) *Provider {
 // ListModels discovers the picker-visible models from Codex App Server.
 func (p *Provider) ListModels(ctx context.Context) ([]llmprovider.Model, error) {
 	type appServerModel struct {
-		ID    string `json:"id"`
-		Model string `json:"model"`
+		ID                  string `json:"id"`
+		Model               string `json:"model"`
+		ContextLength       int64  `json:"contextLength"`
+		ContextWindow       int64  `json:"contextWindow"`
+		ContextWindowTokens int64  `json:"contextWindowTokens"`
+		MaxContextLength    int64  `json:"maxContextLength"`
+		MaxModelLength      int64  `json:"maxModelLen"`
 	}
 	models := make([]llmprovider.Model, 0)
 	var cursor string
@@ -97,7 +102,22 @@ func (p *Provider) ListModels(ctx context.Context) ([]llmprovider.Model, error) 
 		for _, model := range response.Data {
 			id := firstNonEmpty(model.Model, model.ID)
 			if id != "" {
-				models = append(models, llmprovider.Model{ID: id, Object: "model", OwnedBy: "codex"})
+				contextLength := model.ContextLength
+				if contextLength == 0 {
+					contextLength = model.ContextWindow
+				}
+				if contextLength == 0 {
+					contextLength = model.ContextWindowTokens
+				}
+				if contextLength == 0 {
+					contextLength = model.MaxContextLength
+				}
+				if contextLength == 0 {
+					contextLength = model.MaxModelLength
+				}
+				models = append(models, llmprovider.Model{
+					ID: id, Object: "model", OwnedBy: "codex", ContextLength: contextLength,
+				})
 			}
 		}
 		if response.NextCursor == nil || *response.NextCursor == "" {

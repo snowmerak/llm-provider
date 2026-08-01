@@ -37,6 +37,15 @@ curl http://127.0.0.1:8080/v1/models
 
 `models`가 Provider 설정에 있으면 그 목록을 allowlist로 사용합니다. 생략하면 OpenAI-compatible Provider는 `GET /models`를, Codex Provider는 App Server의 `model/list`를 호출하여 실제 모델을 조회합니다.
 
+Upstream 모델 목록에 `context_length`, `max_model_len`, `context_window`,
+`context_window_tokens`, `max_context_length`가 있으면 Gateway는 이를
+`context_length`로 정규화해 반환합니다. 단일 모델 정보도 같은 OpenAI 호환
+모델 객체로 조회할 수 있습니다.
+
+```bash
+curl http://127.0.0.1:8080/v1/models/local/Agents-A1-4bit
+```
+
 ### Chat Completions
 
 ```bash

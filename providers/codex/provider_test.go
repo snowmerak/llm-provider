@@ -21,6 +21,41 @@ func TestDefaultCommandStartsCodexAppServer(t *testing.T) {
 	}
 }
 
+func TestListModelsPreservesContextLength(t *testing.T) {
+	fake := newFakeTransport()
+	provider := New(func(config *config) {
+		config.transportFactoryForTest = func() (transport, error) { return fake, nil }
+	})
+	defer provider.Close()
+
+	go func() {
+		for data := range fake.writes {
+			var request struct {
+				ID     int64  `json:"id"`
+				Method string `json:"method"`
+			}
+			_ = json.Unmarshal(data, &request)
+			switch request.Method {
+			case "initialize":
+				fake.send(map[string]any{"id": request.ID, "result": map[string]any{}})
+			case "model/list":
+				fake.send(map[string]any{"id": request.ID, "result": map[string]any{
+					"data": []map[string]any{{"id": "picker-id", "model": "codex-test", "contextWindow": 400000}},
+				}})
+				return
+			}
+		}
+	}()
+
+	models, err := provider.ListModels(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 1 || models[0].ID != "codex-test" || models[0].ContextLength != 400000 {
+		t.Fatalf("models = %#v", models)
+	}
+}
+
 type fakeTransport struct {
 	reads     chan []byte
 	writes    chan []byte

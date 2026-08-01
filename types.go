@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -244,10 +245,54 @@ type ChatChunk struct {
 
 // Model is the common OpenAI-compatible model-list representation.
 type Model struct {
-	ID      string `json:"id"`
-	Object  string `json:"object,omitempty"`
-	Created int64  `json:"created,omitempty"`
-	OwnedBy string `json:"owned_by,omitempty"`
+	ID            string `json:"id"`
+	Object        string `json:"object,omitempty"`
+	Created       int64  `json:"created,omitempty"`
+	OwnedBy       string `json:"owned_by,omitempty"`
+	ContextLength int64  `json:"context_length,omitempty"`
+}
+
+// UnmarshalJSON accepts the context-window field names commonly exposed by
+// OpenAI-compatible servers and normalizes them to context_length on output.
+func (m *Model) UnmarshalJSON(data []byte) error {
+	type model Model
+	var decoded model
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*m = Model(decoded)
+	if m.ContextLength > 0 {
+		return nil
+	}
+	m.ContextLength = 0
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	for _, name := range []string{"max_model_len", "context_window", "context_window_tokens", "max_context_length"} {
+		if value := positiveJSONInt(fields[name]); value > 0 {
+			m.ContextLength = value
+			break
+		}
+	}
+	return nil
+}
+
+func positiveJSONInt(data json.RawMessage) int64 {
+	if len(data) == 0 {
+		return 0
+	}
+	var number json.Number
+	if err := json.Unmarshal(data, &number); err == nil {
+		value, _ := number.Int64()
+		return value
+	}
+	var text string
+	if err := json.Unmarshal(data, &text); err == nil {
+		value, _ := strconv.ParseInt(text, 10, 64)
+		return value
+	}
+	return 0
 }
 
 // ModelLister is an optional provider capability used by routing gateways.

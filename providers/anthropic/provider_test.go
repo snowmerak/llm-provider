@@ -125,3 +125,22 @@ func TestSonnetFiveRejectsNonDefaultSampling(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 }
+
+func TestListModelsPreservesContextLength(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/models" || request.URL.Query().Get("limit") != "1000" {
+			t.Fatalf("request URL = %s", request.URL)
+		}
+		_, _ = io.WriteString(writer, `{"data":[{"id":"claude-test","context_window_tokens":200000}]}`)
+	}))
+	defer server.Close()
+
+	models, err := New(WithBaseURL(server.URL), WithAPIKey("secret")).ListModels(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 1 || models[0].ID != "claude-test" || models[0].OwnedBy != "anthropic" ||
+		models[0].ContextLength != 200000 {
+		t.Fatalf("models = %#v", models)
+	}
+}

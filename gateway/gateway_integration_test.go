@@ -42,19 +42,23 @@ func TestIntegrationModelList(t *testing.T) {
 	defer response.Body.Close()
 	var envelope struct {
 		Data []struct {
-			ID string `json:"id"`
+			ID            string `json:"id"`
+			ContextLength int64  `json:"context_length"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(response.Body).Decode(&envelope); err != nil {
 		t.Fatal(err)
 	}
-	var codexModel, localModel bool
+	var codexModel, localModel, localContextLength bool
 	for _, model := range envelope.Data {
 		codexModel = codexModel || strings.HasPrefix(model.ID, "codex/")
 		localModel = localModel || strings.HasPrefix(model.ID, "local/")
+		localContextLength = localContextLength ||
+			(strings.HasPrefix(model.ID, "local/") && model.ContextLength > 0)
 	}
-	if !codexModel || !localModel {
-		t.Fatalf("missing prefixed models: codex=%v local=%v count=%d", codexModel, localModel, len(envelope.Data))
+	if !codexModel || !localModel || !localContextLength {
+		t.Fatalf("missing model metadata: codex=%v local=%v local_context_length=%v count=%d",
+			codexModel, localModel, localContextLength, len(envelope.Data))
 	}
 }
 

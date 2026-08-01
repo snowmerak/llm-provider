@@ -111,17 +111,24 @@ func (p *Provider) ListModels(ctx context.Context) ([]llmprovider.Model, error) 
 	}
 	defer response.Body.Close()
 	var envelope struct {
-		Data []struct {
-			ID        string `json:"id"`
-			CreatedAt string `json:"created_at"`
-		} `json:"data"`
+		Data []json.RawMessage `json:"data"`
 	}
 	if err := json.NewDecoder(response.Body).Decode(&envelope); err != nil {
 		return nil, fmt.Errorf("anthropic: decode model list: %w", err)
 	}
 	models := make([]llmprovider.Model, 0, len(envelope.Data))
-	for _, model := range envelope.Data {
-		models = append(models, llmprovider.Model{ID: model.ID, Object: "model", OwnedBy: "anthropic"})
+	for _, data := range envelope.Data {
+		var model llmprovider.Model
+		if err := json.Unmarshal(data, &model); err != nil {
+			return nil, fmt.Errorf("anthropic: decode model: %w", err)
+		}
+		if model.Object == "" {
+			model.Object = "model"
+		}
+		if model.OwnedBy == "" {
+			model.OwnedBy = "anthropic"
+		}
+		models = append(models, model)
 	}
 	return models, nil
 }

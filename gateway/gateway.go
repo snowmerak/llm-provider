@@ -185,32 +185,85 @@ func buildProvider(config ProviderConfig) (llmprovider.Provider, error) {
 func (g *Gateway) Models(ctx context.Context) ([]llmprovider.Model, error) {
 	models := make([]llmprovider.Model, 0)
 	for _, route := range g.order {
-		if len(route.models) > 0 {
-			for _, id := range route.models {
-				models = append(models, llmprovider.Model{ID: route.prefix + "/" + id, Object: "model", OwnedBy: route.id})
-			}
-			continue
+		listed, err := g.routeModels(ctx, route)
+		if err != nil {
+			return nil, err
 		}
-		lister, ok := route.provider.(llmprovider.ModelLister)
-		if !ok {
+		models = append(models, listed...)
+	}
+	return models, nil
+}
+
+// Model returns the OpenAI-compatible model object for a prefixed model ID.
+func (g *Gateway) Model(ctx context.Context, id string) (llmprovider.Model, error) {
+	prefix, _, found := strings.Cut(id, "/")
+	if !found || prefix == "" {
+		return llmprovider.Model{}, fmt.Errorf("gateway: model %q must use a configured provider prefix", id)
+	}
+	route := g.routes[prefix]
+	if route == nil {
+		return llmprovider.Model{}, fmt.Errorf("gateway: model %q uses unknown provider prefix %q", id, prefix)
+	}
+	models, err := g.routeModels(ctx, route)
+	if err != nil {
+		return llmprovider.Model{}, err
+	}
+	for _, model := range models {
+		if model.ID == id {
+			return model, nil
+		}
+	}
+	return llmprovider.Model{}, fmt.Errorf("gateway: model %q was not found", id)
+}
+
+func (g *Gateway) routeModels(ctx context.Context, route *route) ([]llmprovider.Model, error) {
+	lister, canList := route.provider.(llmprovider.ModelLister)
+	if len(route.models) == 0 {
+		if !canList {
 			return nil, fmt.Errorf("gateway: provider %q cannot list models and has no static models", route.id)
 		}
 		listed, err := lister.ListModels(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("gateway: list models for %q: %w", route.id, err)
 		}
-		for _, model := range listed {
-			model.ID = route.prefix + "/" + model.ID
-			if model.Object == "" {
-				model.Object = "model"
+		return prefixedModels(route, listed), nil
+	}
+
+	// Static models remain the authoritative allowlist. If discovery works, use
+	// it only to enrich the allowlisted entries with upstream metadata.
+	metadata := make(map[string]llmprovider.Model)
+	if canList {
+		if listed, err := lister.ListModels(ctx); err == nil {
+			for _, model := range listed {
+				metadata[model.ID] = model
 			}
-			if model.OwnedBy == "" {
-				model.OwnedBy = route.id
-			}
-			models = append(models, model)
 		}
 	}
-	return models, nil
+	listed := make([]llmprovider.Model, 0, len(route.models))
+	for _, id := range route.models {
+		model := llmprovider.Model{ID: id, Object: "model", OwnedBy: route.id}
+		if upstream, ok := metadata[id]; ok {
+			model.Created = upstream.Created
+			model.ContextLength = upstream.ContextLength
+		}
+		listed = append(listed, model)
+	}
+	return prefixedModels(route, listed), nil
+}
+
+func prefixedModels(route *route, listed []llmprovider.Model) []llmprovider.Model {
+	models := make([]llmprovider.Model, 0, len(listed))
+	for _, model := range listed {
+		model.ID = route.prefix + "/" + model.ID
+		if model.Object == "" {
+			model.Object = "model"
+		}
+		if model.OwnedBy == "" {
+			model.OwnedBy = route.id
+		}
+		models = append(models, model)
+	}
+	return models
 }
 
 func (g *Gateway) resolve(model string) (*route, string, error) {

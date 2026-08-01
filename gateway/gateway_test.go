@@ -18,7 +18,7 @@ func TestModelsAndChatRouting(t *testing.T) {
 			if request.Header.Get("Authorization") != "Bearer backend-secret" {
 				t.Errorf("model authorization = %q", request.Header.Get("Authorization"))
 			}
-			_, _ = io.WriteString(writer, `{"object":"list","data":[{"id":"vendor/model-a","object":"model","owned_by":"vendor"}]}`)
+			_, _ = io.WriteString(writer, `{"object":"list","data":[{"id":"vendor/model-a","object":"model","owned_by":"vendor","max_model_len":262144}]}`)
 		case "/v1/chat/completions":
 			if request.Header.Get("Authorization") != "Bearer backend-secret" {
 				t.Errorf("chat authorization = %q", request.Header.Get("Authorization"))
@@ -73,14 +73,32 @@ func TestModelsAndChatRouting(t *testing.T) {
 	defer modelResponse.Body.Close()
 	var models struct {
 		Data []struct {
-			ID string `json:"id"`
+			ID            string `json:"id"`
+			ContextLength int64  `json:"context_length"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(modelResponse.Body).Decode(&models); err != nil {
 		t.Fatal(err)
 	}
-	if len(models.Data) != 1 || models.Data[0].ID != "openrouter/vendor/model-a" {
+	if len(models.Data) != 1 || models.Data[0].ID != "openrouter/vendor/model-a" ||
+		models.Data[0].ContextLength != 262144 {
 		t.Fatalf("models = %#v", models.Data)
+	}
+	detailResponse, err := http.Get(server.URL + "/v1/models/openrouter/vendor/model-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer detailResponse.Body.Close()
+	var detail struct {
+		ID            string `json:"id"`
+		ContextLength int64  `json:"context_length"`
+	}
+	if err := json.NewDecoder(detailResponse.Body).Decode(&detail); err != nil {
+		t.Fatal(err)
+	}
+	if detailResponse.StatusCode != http.StatusOK || detail.ID != "openrouter/vendor/model-a" ||
+		detail.ContextLength != 262144 {
+		t.Fatalf("model detail status=%d body=%#v", detailResponse.StatusCode, detail)
 	}
 
 	body := `{"model":"openrouter/vendor/model-a","messages":[{"role":"user","content":[{"type":"text","text":"hello","cache_control":{"type":"ephemeral"}}]}],"prompt_cache_key":"cache-key-1"}`
@@ -118,6 +136,35 @@ func TestModelsAndChatRouting(t *testing.T) {
 	}
 	if completion.Model != "openrouter/vendor/model-a" || completion.Usage.PromptDetails.CachedTokens != 8 {
 		t.Fatalf("completion = %#v", completion)
+	}
+}
+
+func TestStaticModelAllowlistIsEnrichedFromUpstream(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/v1/models" {
+			http.NotFound(writer, request)
+			return
+		}
+		_, _ = io.WriteString(writer, `{"object":"list","data":[`+
+			`{"id":"allowed","context_window":131072},{"id":"not-allowed","context_window":262144}]}`)
+	}))
+	defer upstream.Close()
+
+	gateway, err := New(Config{Providers: []ProviderConfig{{
+		ID: "local", Type: "openai-compatible", Enabled: true,
+		BaseURL: upstream.URL + "/v1", Models: []string{"allowed"},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gateway.Close()
+
+	models, err := gateway.Models(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 1 || models[0].ID != "local/allowed" || models[0].ContextLength != 131072 {
+		t.Fatalf("models = %#v", models)
 	}
 }
 
