@@ -74,6 +74,40 @@ func New(opts ...Option) *Provider {
 	}
 }
 
+// ListModels discovers the picker-visible models from Codex App Server.
+func (p *Provider) ListModels(ctx context.Context) ([]llmprovider.Model, error) {
+	type appServerModel struct {
+		ID    string `json:"id"`
+		Model string `json:"model"`
+	}
+	models := make([]llmprovider.Model, 0)
+	var cursor string
+	for {
+		params := map[string]any{"limit": 100, "includeHidden": false}
+		if cursor != "" {
+			params["cursor"] = cursor
+		}
+		var response struct {
+			Data       []appServerModel `json:"data"`
+			NextCursor *string          `json:"nextCursor"`
+		}
+		if err := p.Call(ctx, "model/list", params, &response); err != nil {
+			return nil, err
+		}
+		for _, model := range response.Data {
+			id := firstNonEmpty(model.Model, model.ID)
+			if id != "" {
+				models = append(models, llmprovider.Model{ID: id, Object: "model", OwnedBy: "codex"})
+			}
+		}
+		if response.NextCursor == nil || *response.NextCursor == "" {
+			break
+		}
+		cursor = *response.NextCursor
+	}
+	return models, nil
+}
+
 func (p *Provider) Chat(ctx context.Context, request llmprovider.ChatRequest) (*llmprovider.ChatResponse, error) {
 	stream, err := p.ChatStream(ctx, request)
 	if err != nil {
@@ -779,3 +813,4 @@ func firstNonEmpty(values ...string) string {
 }
 
 var _ llmprovider.Provider = (*Provider)(nil)
+var _ llmprovider.ModelLister = (*Provider)(nil)

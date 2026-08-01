@@ -3,6 +3,7 @@ package llmprovider
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 )
 
 // Role identifies the author of a chat message.
@@ -91,11 +92,15 @@ type ChatRequest struct {
 	ToolChoice        any            `json:"tool_choice,omitempty"`
 	ParallelToolCalls *bool          `json:"parallel_tool_calls,omitempty"`
 	Extra             map[string]any `json:"-"`
+	// Headers are request-scoped transport headers. HTTP providers forward
+	// them after applying provider defaults. Authorization, Content-Type, and
+	// Accept remain provider-managed and cannot be overridden here.
+	Headers http.Header `json:"-"`
 
 	// ConversationID continues a stateful provider conversation. The
 	// OpenAI-compatible provider ignores it. The Codex provider treats it as a
 	// Codex thread ID.
-	ConversationID string `json:"-"`
+	ConversationID string `json:"conversation_id,omitempty"`
 	// WorkingDirectory, ReasoningEffort, and OutputSchema are optional Codex
 	// turn overrides. Other providers may ignore them.
 	WorkingDirectory string      `json:"-"`
@@ -117,7 +122,8 @@ type ChatResponse struct {
 	Model          string          `json:"model,omitempty"`
 	Choices        []Choice        `json:"choices"`
 	Usage          Usage           `json:"usage,omitempty"`
-	ConversationID string          `json:"-"`
+	ConversationID string          `json:"conversation_id,omitempty"`
+	Headers        http.Header     `json:"-"`
 	Raw            json.RawMessage `json:"-"`
 }
 
@@ -132,9 +138,17 @@ type Choice struct {
 }
 
 type Usage struct {
-	PromptTokens     int `json:"prompt_tokens,omitempty"`
-	CompletionTokens int `json:"completion_tokens,omitempty"`
-	TotalTokens      int `json:"total_tokens,omitempty"`
+	PromptTokens     int           `json:"prompt_tokens,omitempty"`
+	CompletionTokens int           `json:"completion_tokens,omitempty"`
+	TotalTokens      int           `json:"total_tokens,omitempty"`
+	PromptDetails    *TokenDetails `json:"prompt_tokens_details,omitempty"`
+}
+
+// TokenDetails normalizes prompt-cache accounting exposed by compatible
+// providers while retaining the OpenAI field names on the wire.
+type TokenDetails struct {
+	CachedTokens     int `json:"cached_tokens,omitempty"`
+	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
 }
 
 // ChatChunk uses the OpenAI chat.completion.chunk shape and also carries the
@@ -146,14 +160,33 @@ type ChatChunk struct {
 	Model          string          `json:"model,omitempty"`
 	Choices        []Choice        `json:"choices"`
 	Usage          *Usage          `json:"usage,omitempty"`
-	ConversationID string          `json:"-"`
+	ConversationID string          `json:"conversation_id,omitempty"`
 	Raw            json.RawMessage `json:"-"`
+}
+
+// Model is the common OpenAI-compatible model-list representation.
+type Model struct {
+	ID      string `json:"id"`
+	Object  string `json:"object,omitempty"`
+	Created int64  `json:"created,omitempty"`
+	OwnedBy string `json:"owned_by,omitempty"`
+}
+
+// ModelLister is an optional provider capability used by routing gateways.
+type ModelLister interface {
+	ListModels(context.Context) ([]Model, error)
 }
 
 // Stream returns chunks in order. Recv returns io.EOF after the final chunk.
 type Stream interface {
 	Recv() (*ChatChunk, error)
 	Close() error
+}
+
+// ResponseHeaderer is an optional stream capability for HTTP response
+// metadata such as provider cache status.
+type ResponseHeaderer interface {
+	ResponseHeaders() http.Header
 }
 
 // Provider is the minimal contract implemented by LLM backends.

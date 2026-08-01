@@ -85,7 +85,25 @@ func (p *Provider) Chat(ctx context.Context, request llmprovider.ChatRequest) (*
 		return nil, fmt.Errorf("openai: decode chat completion: %w", err)
 	}
 	result.Raw = append(result.Raw[:0], data...)
+	result.Headers = response.Header.Clone()
 	return &result, nil
+}
+
+// ListModels returns models exposed by the configured OpenAI-compatible
+// endpoint.
+func (p *Provider) ListModels(ctx context.Context) ([]llmprovider.Model, error) {
+	response, err := p.doRequest(ctx, http.MethodGet, "/models", nil, nil, false)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	var envelope struct {
+		Data []llmprovider.Model `json:"data"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("openai: decode model list: %w", err)
+	}
+	return envelope.Data, nil
 }
 
 func (p *Provider) ChatStream(ctx context.Context, request llmprovider.ChatRequest) (llmprovider.Stream, error) {
@@ -93,7 +111,7 @@ func (p *Provider) ChatStream(ctx context.Context, request llmprovider.ChatReque
 	if err != nil {
 		return nil, err
 	}
-	return &sseStream{body: response.Body, reader: bufio.NewReader(response.Body)}, nil
+	return &sseStream{body: response.Body, reader: bufio.NewReader(response.Body), headers: response.Header.Clone()}, nil
 }
 
 func (p *Provider) Close() error { return nil }
@@ -128,12 +146,25 @@ func (p *Provider) do(ctx context.Context, request llmprovider.ChatRequest, stre
 	if err != nil {
 		return nil, fmt.Errorf("openai: encode chat completion: %w", err)
 	}
-	endpoint := strings.TrimRight(p.config.baseURL, "/") + "/chat/completions"
-	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	return p.doRequest(ctx, http.MethodPost, "/chat/completions", bytes.NewReader(body), request.Headers, stream)
+}
+
+func (p *Provider) doRequest(ctx context.Context, method, path string, body io.Reader, requestHeaders http.Header, stream bool) (*http.Response, error) {
+	endpoint := strings.TrimRight(p.config.baseURL, "/") + path
+	httpRequest, err := http.NewRequestWithContext(ctx, method, endpoint, body)
 	if err != nil {
-		return nil, fmt.Errorf("openai: create chat request: %w", err)
+		return nil, fmt.Errorf("openai: create %s request: %w", path, err)
 	}
 	for key, values := range p.config.headers {
+		for _, value := range values {
+			httpRequest.Header.Add(key, value)
+		}
+	}
+	for key, values := range requestHeaders {
+		if isReservedHeader(key) {
+			continue
+		}
+		httpRequest.Header.Del(key)
 		for _, value := range values {
 			httpRequest.Header.Add(key, value)
 		}
@@ -149,7 +180,7 @@ func (p *Provider) do(ctx context.Context, request llmprovider.ChatRequest, stre
 
 	response, err := p.config.httpClient.Do(httpRequest)
 	if err != nil {
-		return nil, fmt.Errorf("openai: chat request: %w", err)
+		return nil, fmt.Errorf("openai: %s request: %w", path, err)
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		defer response.Body.Close()
@@ -160,6 +191,15 @@ func (p *Provider) do(ctx context.Context, request llmprovider.ChatRequest, stre
 		return nil, decodeAPIError(response.StatusCode, data)
 	}
 	return response, nil
+}
+
+func isReservedHeader(key string) bool {
+	switch http.CanonicalHeaderKey(key) {
+	case "Authorization", "Content-Type", "Accept", "Host":
+		return true
+	default:
+		return false
+	}
 }
 
 func setOptional[T any](payload map[string]any, key string, value *T) {
@@ -196,10 +236,15 @@ func decodeAPIError(status int, data []byte) error {
 }
 
 type sseStream struct {
-	body   io.ReadCloser
-	reader *bufio.Reader
-	mu     sync.Mutex
-	done   bool
+	body    io.ReadCloser
+	reader  *bufio.Reader
+	headers http.Header
+	mu      sync.Mutex
+	done    bool
+}
+
+func (s *sseStream) ResponseHeaders() http.Header {
+	return s.headers.Clone()
 }
 
 func (s *sseStream) Recv() (*llmprovider.ChatChunk, error) {
@@ -267,3 +312,4 @@ func readSSEData(reader *bufio.Reader) (string, error) {
 }
 
 var _ llmprovider.Provider = (*Provider)(nil)
+var _ llmprovider.ModelLister = (*Provider)(nil)

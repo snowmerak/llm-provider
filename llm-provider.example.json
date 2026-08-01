@@ -1,0 +1,49 @@
+{
+  "listen": "127.0.0.1:8080",
+  "providers": [
+    {
+      "id": "codex",
+      "type": "codex-app-server",
+      "prefix": "codex",
+      "enabled": true,
+      "models": ["gpt-5.6-luna"],
+      "codex": {
+        "command": "codex",
+        "args": ["app-server", "--listen", "stdio://"],
+        "model": "gpt-5.6-luna",
+        "working_directory": ".",
+        "sandbox": "read-only",
+        "approval_policy": "never",
+        "ephemeral": true,
+        "experimental_api": true
+      }
+    },
+    {
+      "id": "openrouter",
+      "type": "openrouter",
+      "prefix": "openrouter",
+      "enabled": false,
+      "api_key_env": "OPENROUTER_API_KEY",
+      "headers": {
+        "HTTP-Referer": "https://example.local",
+        "X-OpenRouter-Title": "llm-provider"
+      }
+    },
+    {
+      "id": "local",
+      "type": "openai-compatible",
+      "prefix": "local",
+      "enabled": true,
+      "base_url": "http://macmini:11888/v1",
+      "models": ["gpt-5.6-luna"]
+    },
+    {
+      "id": "grok",
+      "type": "openai-compatible",
+      "prefix": "grok",
+      "enabled": false,
+      "base_url": "https://api.x.ai/v1",
+      "api_key_env": "XAI_API_KEY"
+    }
+  ]
+}
