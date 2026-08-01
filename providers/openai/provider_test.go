@@ -60,7 +60,8 @@ func TestChatWithTools(t *testing.T) {
 func TestChatToolResultMessage(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
-			Messages []llmprovider.Message `json:"messages"`
+			Messages       []llmprovider.Message `json:"messages"`
+			ConversationID string                `json:"conversation_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			t.Fatal(err)
@@ -68,18 +69,68 @@ func TestChatToolResultMessage(t *testing.T) {
 		if len(body.Messages) != 3 || body.Messages[1].ToolCalls[0].ID != "call_1" || body.Messages[2].ToolCallID != "call_1" {
 			t.Fatalf("messages = %#v", body.Messages)
 		}
+		if body.ConversationID != "thread_1" {
+			t.Fatalf("conversation id = %q", body.ConversationID)
+		}
 		_, _ = io.WriteString(w, `{"id":"chat_2","choices":[{"index":0,"message":{"role":"assistant","content":"sunny"},"finish_reason":"stop"}]}`)
 	}))
 	defer server.Close()
 
 	client := llmprovider.New(New(WithBaseURL(server.URL)))
-	_, err := client.Chat(context.Background(), llmprovider.ChatRequest{Messages: []llmprovider.Message{
+	_, err := client.Chat(context.Background(), llmprovider.ChatRequest{ConversationID: "thread_1", Messages: []llmprovider.Message{
 		{Role: llmprovider.RoleUser, Content: "weather?"},
 		{Role: llmprovider.RoleAssistant, ToolCalls: []llmprovider.ToolCall{{ID: "call_1", Type: llmprovider.ToolTypeFunction, Function: llmprovider.FunctionCall{Name: "get_weather", Arguments: `{}`}}}},
 		{Role: llmprovider.RoleTool, ToolCallID: "call_1", Content: `{"weather":"sunny"}`},
 	}})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestChatPreservesPromptCacheExtensions(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body["prompt_cache_key"] != "request-key" {
+			t.Fatalf("prompt cache key = %#v", body["prompt_cache_key"])
+		}
+		cacheControl, ok := body["cache_control"].(map[string]any)
+		if !ok || cacheControl["type"] != "ephemeral" || cacheControl["ttl"] != "1h" {
+			t.Fatalf("cache control = %#v", body["cache_control"])
+		}
+		messages := body["messages"].([]any)
+		content := messages[0].(map[string]any)["content"].([]any)
+		breakpoint := content[0].(map[string]any)["prompt_cache_breakpoint"].(map[string]any)
+		if breakpoint["mode"] != "explicit" {
+			t.Fatalf("content breakpoint = %#v", content)
+		}
+		_, _ = io.WriteString(w, `{"id":"chat_cache","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1200,"completion_tokens":1,"total_tokens":1201,"prompt_tokens_details":{"cached_tokens":1000,"cache_write_tokens":50}}}`)
+	}))
+	defer server.Close()
+
+	provider := New(
+		WithBaseURL(server.URL),
+		WithBodyField("prompt_cache_key", "default-key"),
+		WithBodyField("cache_control", map[string]any{"type": "ephemeral", "ttl": "1h"}),
+	)
+	response, err := provider.Chat(context.Background(), llmprovider.ChatRequest{
+		Messages: []llmprovider.Message{{
+			Role: llmprovider.RoleSystem,
+			ContentParts: []llmprovider.MessageContentPart{{
+				"type": "text", "text": "stable instructions",
+				"prompt_cache_breakpoint": map[string]any{"mode": "explicit"},
+			}},
+		}},
+		Extra: map[string]any{"prompt_cache_key": "request-key"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Usage.PromptDetails == nil || response.Usage.PromptDetails.CachedTokens != 1000 ||
+		response.Usage.PromptDetails.CacheWriteTokens != 50 {
+		t.Fatalf("cache usage = %#v", response.Usage)
 	}
 }
 

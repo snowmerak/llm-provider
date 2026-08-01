@@ -26,7 +26,9 @@
       "api_key_env": "OPENROUTER_API_KEY",
       "headers": {
         "HTTP-Referer": "https://example.local",
-        "X-OpenRouter-Title": "llm-provider"
+        "X-OpenRouter-Title": "llm-provider",
+        "X-OpenRouter-Cache": "true",
+        "X-OpenRouter-Cache-TTL": "600"
       }
     },
     {

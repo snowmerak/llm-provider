@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"slices"
 	"sync"
@@ -285,6 +286,317 @@ func serveDynamicToolChat(transport *fakeTransport) error {
 			}
 		case <-time.After(5 * time.Second):
 			return errors.New("timed out waiting for dynamic tool flow")
+		}
+	}
+}
+
+func TestChatDelegatesDynamicTool(t *testing.T) {
+	fake := newFakeTransport()
+	provider := New(func(config *config) {
+		config.transportFactoryForTest = func() (transport, error) { return fake, nil }
+	})
+	defer provider.Close()
+	serverErr := make(chan error, 1)
+	go func() { serverErr <- serveDelegatedToolChat(fake) }()
+
+	response, err := provider.Chat(context.Background(), llmprovider.ChatRequest{
+		Model:    "test-model",
+		Messages: []llmprovider.Message{{Role: llmprovider.RoleUser, Content: "Use lookup_value."}},
+		Tools: []llmprovider.Tool{{
+			Type: llmprovider.ToolTypeFunction,
+			Function: llmprovider.FunctionDefinition{
+				Name: "lookup_value", Description: "Look up a value.",
+				Parameters: map[string]any{"type": "object", "properties": map[string]any{
+					"key": map[string]any{"type": "string"},
+				}},
+			},
+		}},
+		ToolChoice: llmprovider.ToolChoiceAuto,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Choices) != 1 || response.Choices[0].FinishReason != "tool_calls" ||
+		len(response.Choices[0].Message.ToolCalls) != 1 {
+		t.Fatalf("response = %#v", response)
+	}
+	call := response.Choices[0].Message.ToolCalls[0]
+	if call.ID != "call_delegate_1" || call.Function.Name != "lookup_value" ||
+		call.Function.Arguments != `{"key":"demo"}` || response.ConversationID != "thread_delegate" {
+		t.Fatalf("tool call = %#v, conversation = %q", call, response.ConversationID)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func serveDelegatedToolChat(transport *fakeTransport) error {
+	for {
+		select {
+		case data := <-transport.writes:
+			var request struct {
+				ID     int64          `json:"id"`
+				Method string         `json:"method"`
+				Params map[string]any `json:"params"`
+				Result map[string]any `json:"result"`
+			}
+			if err := json.Unmarshal(data, &request); err != nil {
+				return err
+			}
+			switch request.Method {
+			case "initialize":
+				transport.send(map[string]any{"id": request.ID, "result": map[string]any{}})
+			case "initialized":
+			case "thread/start":
+				tools, ok := request.Params["dynamicTools"].([]any)
+				if !ok || len(tools) != 1 {
+					return errors.New("delegated dynamic tools were not forwarded")
+				}
+				transport.send(map[string]any{"id": request.ID, "result": map[string]any{
+					"thread": map[string]any{"id": "thread_delegate"},
+				}})
+			case "turn/start":
+				transport.send(map[string]any{"id": request.ID, "result": map[string]any{
+					"turn": map[string]any{"id": "turn_delegate", "status": "inProgress"},
+				}})
+				transport.send(map[string]any{"id": 901, "method": "item/tool/call", "params": map[string]any{
+					"threadId": "thread_delegate", "turnId": "turn_delegate", "callId": "call_delegate_1",
+					"tool": "lookup_value", "arguments": map[string]any{"key": "demo"},
+				}})
+				return nil
+			default:
+				return errors.New("unexpected method: " + request.Method)
+			}
+		case <-time.After(5 * time.Second):
+			return errors.New("timed out waiting for delegated tool flow")
+		}
+	}
+}
+
+func TestChatContinuesFromDelegatedToolResult(t *testing.T) {
+	fake := newFakeTransport()
+	provider := New(func(config *config) {
+		config.transportFactoryForTest = func() (transport, error) { return fake, nil }
+	})
+	defer provider.Close()
+	serverErr := make(chan error, 1)
+	go func() { serverErr <- serveDelegatedToolContinuation(fake) }()
+
+	response, err := provider.Chat(context.Background(), llmprovider.ChatRequest{
+		Model: "test-model",
+		Messages: []llmprovider.Message{
+			{Role: llmprovider.RoleUser, Content: "Use lookup_value."},
+			{Role: llmprovider.RoleAssistant, ToolCalls: []llmprovider.ToolCall{{
+				ID: "call_delegate_1", Type: llmprovider.ToolTypeFunction,
+				Function: llmprovider.FunctionCall{Name: "lookup_value", Arguments: `{"key":"demo"}`},
+			}}},
+			{Role: llmprovider.RoleTool, ToolCallID: "call_delegate_1", Content: `{"value":"RESULT_42"}`},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Choices[0].Message.Content != "The result is RESULT_42" {
+		t.Fatalf("response = %#v", response)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestChatResumesDelegatedToolOnSameTurn(t *testing.T) {
+	fake := newFakeTransport()
+	provider := New(func(config *config) {
+		config.transportFactoryForTest = func() (transport, error) { return fake, nil }
+	})
+	defer provider.Close()
+	serverErr := make(chan error, 1)
+	go func() { serverErr <- serveSameTurnDelegatedTool(fake) }()
+
+	request := llmprovider.ChatRequest{
+		Model:    "test-model",
+		Messages: []llmprovider.Message{{Role: llmprovider.RoleUser, Content: "Use lookup_value."}},
+		Tools: []llmprovider.Tool{{
+			Type: llmprovider.ToolTypeFunction,
+			Function: llmprovider.FunctionDefinition{
+				Name: "lookup_value", Parameters: map[string]any{"type": "object"},
+			},
+		}},
+	}
+	first, err := provider.Chat(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := first.Choices[0].Message.ToolCalls[0]
+	request.ConversationID = first.ConversationID
+	request.Messages = append(request.Messages, first.Choices[0].Message, llmprovider.Message{
+		Role: llmprovider.RoleTool, ToolCallID: call.ID, Content: `{"value":"RESULT_42"}`,
+	})
+	final, err := provider.Chat(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final.ConversationID != first.ConversationID || final.ID != first.ID {
+		t.Fatalf("same turn was not preserved: first=%q/%q final=%q/%q",
+			first.ConversationID, first.ID, final.ConversationID, final.ID)
+	}
+	if final.Choices[0].Message.Content != "The result is RESULT_42" {
+		t.Fatalf("final response = %#v", final)
+	}
+	if final.Usage.PromptDetails == nil || final.Usage.PromptDetails.CachedTokens != 1000 ||
+		final.Usage.PromptDetails.CacheWriteTokens != 20 {
+		t.Fatalf("cache usage = %#v", final.Usage)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func serveSameTurnDelegatedTool(transport *fakeTransport) error {
+	threadStarts := 0
+	for {
+		select {
+		case data := <-transport.writes:
+			var request struct {
+				ID     int64          `json:"id"`
+				Method string         `json:"method"`
+				Params map[string]any `json:"params"`
+				Result map[string]any `json:"result"`
+			}
+			if err := json.Unmarshal(data, &request); err != nil {
+				return err
+			}
+			switch request.Method {
+			case "initialize":
+				transport.send(map[string]any{"id": request.ID, "result": map[string]any{}})
+			case "initialized":
+			case "thread/start":
+				threadStarts++
+				if threadStarts != 1 {
+					return errors.New("delegated continuation created another thread")
+				}
+				transport.send(map[string]any{"id": request.ID, "result": map[string]any{
+					"thread": map[string]any{"id": "thread_same"},
+				}})
+			case "turn/start":
+				transport.send(map[string]any{"id": request.ID, "result": map[string]any{
+					"turn": map[string]any{"id": "turn_same", "status": "inProgress"},
+				}})
+				transport.send(map[string]any{"id": 902, "method": "item/tool/call", "params": map[string]any{
+					"threadId": "thread_same", "turnId": "turn_same", "callId": "call_same",
+					"tool": "lookup_value", "arguments": map[string]any{"key": "demo"},
+				}})
+			case "":
+				if request.ID != 902 || request.Result["success"] != true {
+					return fmt.Errorf("tool callback response = %#v", request)
+				}
+				items, ok := request.Result["contentItems"].([]any)
+				if !ok || len(items) != 1 || items[0].(map[string]any)["text"] != `{"value":"RESULT_42"}` {
+					return fmt.Errorf("tool callback content = %#v", request.Result)
+				}
+				transport.send(map[string]any{"method": "item/started", "params": map[string]any{
+					"threadId": "thread_same", "turnId": "turn_same",
+					"item": map[string]any{"id": "answer", "type": "agentMessage", "phase": "final_answer"},
+				}})
+				transport.send(map[string]any{"method": "item/agentMessage/delta", "params": map[string]any{
+					"threadId": "thread_same", "turnId": "turn_same", "itemId": "answer",
+					"delta": "The result is RESULT_42",
+				}})
+				transport.send(map[string]any{"method": "thread/tokenUsage/updated", "params": map[string]any{
+					"threadId": "thread_same", "turnId": "turn_same", "tokenUsage": map[string]any{
+						"last": map[string]any{
+							"inputTokens": 1200, "cachedInputTokens": 1000, "cacheWriteInputTokens": 20,
+							"outputTokens": 30, "totalTokens": 1230,
+						},
+					},
+				}})
+				transport.send(map[string]any{"method": "turn/completed", "params": map[string]any{
+					"threadId": "thread_same", "turn": map[string]any{"id": "turn_same", "status": "completed"},
+				}})
+				return nil
+			default:
+				return errors.New("unexpected method: " + request.Method)
+			}
+		case <-time.After(5 * time.Second):
+			return errors.New("timed out waiting for same-turn delegated tool flow")
+		}
+	}
+}
+
+func TestDynamicToolsNamedChoiceFiltersTools(t *testing.T) {
+	provider := New()
+	tools, include, err := provider.dynamicTools(llmprovider.ChatRequest{
+		Tools: []llmprovider.Tool{
+			{Type: llmprovider.ToolTypeFunction, Function: llmprovider.FunctionDefinition{Name: "first"}},
+			{Type: llmprovider.ToolTypeFunction, Function: llmprovider.FunctionDefinition{Name: "second"}},
+		},
+		ToolChoice: llmprovider.NamedToolChoice("second"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !include || len(tools) != 1 || tools[0]["name"] != "second" {
+		t.Fatalf("tools = %#v, include = %v", tools, include)
+	}
+}
+
+func serveDelegatedToolContinuation(transport *fakeTransport) error {
+	for {
+		select {
+		case data := <-transport.writes:
+			var request struct {
+				ID     int64          `json:"id"`
+				Method string         `json:"method"`
+				Params map[string]any `json:"params"`
+			}
+			if err := json.Unmarshal(data, &request); err != nil {
+				return err
+			}
+			switch request.Method {
+			case "initialize":
+				transport.send(map[string]any{"id": request.ID, "result": map[string]any{}})
+			case "initialized":
+			case "thread/start":
+				transport.send(map[string]any{"id": request.ID, "result": map[string]any{
+					"thread": map[string]any{"id": "thread_continuation"},
+				}})
+			case "thread/inject_items":
+				items, ok := request.Params["items"].([]any)
+				if !ok || len(items) != 3 {
+					return fmt.Errorf("continuation items = %#v", request.Params["items"])
+				}
+				last := items[2].(map[string]any)
+				if last["type"] != "function_call_output" || last["call_id"] != "call_delegate_1" {
+					return fmt.Errorf("last continuation item = %#v", last)
+				}
+				transport.send(map[string]any{"id": request.ID, "result": map[string]any{}})
+			case "turn/start":
+				input, ok := request.Params["input"].([]any)
+				if !ok || len(input) != 1 ||
+					input[0].(map[string]any)["text"] != "Continue the response using the supplied function result." {
+					return fmt.Errorf("continuation input = %#v", request.Params["input"])
+				}
+				transport.send(map[string]any{"id": request.ID, "result": map[string]any{
+					"turn": map[string]any{"id": "turn_continuation", "status": "inProgress"},
+				}})
+				transport.send(map[string]any{"method": "item/started", "params": map[string]any{
+					"threadId": "thread_continuation", "turnId": "turn_continuation",
+					"item": map[string]any{"id": "answer", "type": "agentMessage", "phase": "final_answer"},
+				}})
+				transport.send(map[string]any{"method": "item/agentMessage/delta", "params": map[string]any{
+					"threadId": "thread_continuation", "turnId": "turn_continuation",
+					"itemId": "answer", "delta": "The result is RESULT_42",
+				}})
+				transport.send(map[string]any{"method": "turn/completed", "params": map[string]any{
+					"threadId": "thread_continuation",
+					"turn":     map[string]any{"id": "turn_continuation", "status": "completed"},
+				}})
+				return nil
+			default:
+				return errors.New("unexpected method: " + request.Method)
+			}
+		case <-time.After(5 * time.Second):
+			return errors.New("timed out waiting for delegated continuation")
 		}
 	}
 }

@@ -3,7 +3,9 @@ package llmprovider
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"strings"
 )
 
 // Role identifies the author of a chat message.
@@ -19,11 +21,86 @@ const (
 
 // Message is the common text-message subset supported by all providers.
 type Message struct {
-	Role       Role       `json:"role"`
-	Content    string     `json:"content,omitempty"`
-	Name       string     `json:"name,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	Role Role `json:"role"`
+	// Content is the common text form. ContentParts preserves structured
+	// OpenAI-compatible content blocks, including provider cache breakpoints.
+	// When ContentParts is non-empty it is encoded as the content field instead
+	// of Content.
+	Content      string               `json:"-"`
+	ContentParts []MessageContentPart `json:"-"`
+	Name         string               `json:"name,omitempty"`
+	ToolCallID   string               `json:"tool_call_id,omitempty"`
+	ToolCalls    []ToolCall           `json:"tool_calls,omitempty"`
+}
+
+// MessageContentPart retains provider-specific multimodal and cache-control
+// fields without narrowing the OpenAI-compatible content block schema.
+type MessageContentPart map[string]any
+
+func (m Message) MarshalJSON() ([]byte, error) {
+	type wireMessage struct {
+		Role       Role       `json:"role"`
+		Content    any        `json:"content,omitempty"`
+		Name       string     `json:"name,omitempty"`
+		ToolCallID string     `json:"tool_call_id,omitempty"`
+		ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	}
+	var content any
+	if len(m.ContentParts) > 0 {
+		content = m.ContentParts
+	} else if m.Content != "" {
+		content = m.Content
+	}
+	return json.Marshal(wireMessage{
+		Role: m.Role, Content: content, Name: m.Name,
+		ToolCallID: m.ToolCallID, ToolCalls: m.ToolCalls,
+	})
+}
+
+func (m *Message) UnmarshalJSON(data []byte) error {
+	type wireMessage struct {
+		Role       Role            `json:"role"`
+		Content    json.RawMessage `json:"content"`
+		Name       string          `json:"name,omitempty"`
+		ToolCallID string          `json:"tool_call_id,omitempty"`
+		ToolCalls  []ToolCall      `json:"tool_calls,omitempty"`
+	}
+	var wire wireMessage
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	m.Role, m.Name, m.ToolCallID, m.ToolCalls = wire.Role, wire.Name, wire.ToolCallID, wire.ToolCalls
+	m.Content, m.ContentParts = "", nil
+	if len(wire.Content) == 0 || string(wire.Content) == "null" {
+		return nil
+	}
+	if wire.Content[0] == '"' {
+		return json.Unmarshal(wire.Content, &m.Content)
+	}
+	if err := json.Unmarshal(wire.Content, &m.ContentParts); err != nil {
+		return fmt.Errorf("message content must be a string or content-block array: %w", err)
+	}
+	return nil
+}
+
+// TextContent returns the text represented by either Content or supported
+// text content blocks. It is used by providers such as Codex whose protocol
+// accepts text at the common chat boundary.
+func (m Message) TextContent() string {
+	if len(m.ContentParts) == 0 {
+		return m.Content
+	}
+	parts := make([]string, 0, len(m.ContentParts))
+	for _, part := range m.ContentParts {
+		typeName, _ := part["type"].(string)
+		if typeName != "text" && typeName != "input_text" && typeName != "output_text" {
+			continue
+		}
+		if value, ok := part["text"].(string); ok {
+			parts = append(parts, value)
+		}
+	}
+	return strings.Join(parts, "")
 }
 
 type ToolType string
@@ -72,8 +149,9 @@ type ToolResult struct {
 	IsError bool
 }
 
-// ToolHandler executes a Codex dynamic function call. OpenAI-compatible
-// providers return tool calls to the caller instead of invoking this handler.
+// ToolHandler executes a Codex dynamic function call in-process. When it is
+// nil, the Codex provider delegates dynamic calls to the caller using the
+// OpenAI tool_calls response shape.
 type ToolHandler func(context.Context, ToolCall) (ToolResult, error)
 
 // ChatRequest describes a chat completion. Extra fields are sent only by the
@@ -98,8 +176,8 @@ type ChatRequest struct {
 	Headers http.Header `json:"-"`
 
 	// ConversationID continues a stateful provider conversation. The
-	// OpenAI-compatible provider ignores it. The Codex provider treats it as a
-	// Codex thread ID.
+	// OpenAI-compatible provider forwards it as an extension field so gateways
+	// can route stateful backends. The Codex provider treats it as a thread ID.
 	ConversationID string `json:"conversation_id,omitempty"`
 	// WorkingDirectory, ReasoningEffort, and OutputSchema are optional Codex
 	// turn overrides. Other providers may ignore them.
@@ -147,8 +225,8 @@ type Usage struct {
 // TokenDetails normalizes prompt-cache accounting exposed by compatible
 // providers while retaining the OpenAI field names on the wire.
 type TokenDetails struct {
-	CachedTokens     int `json:"cached_tokens,omitempty"`
-	CacheWriteTokens int `json:"cache_write_tokens,omitempty"`
+	CachedTokens     int `json:"cached_tokens"`
+	CacheWriteTokens int `json:"cache_write_tokens"`
 }
 
 // ChatChunk uses the OpenAI chat.completion.chunk shape and also carries the

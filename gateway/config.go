@@ -25,6 +25,7 @@ type ProviderConfig struct {
 	APIKey                 string            `json:"api_key,omitempty"`
 	APIKeyEnv              string            `json:"api_key_env,omitempty"`
 	Headers                map[string]string `json:"headers,omitempty"`
+	Body                   map[string]any    `json:"body,omitempty"`
 	ForwardHeaders         []string          `json:"forward_headers,omitempty"`
 	ForwardResponseHeaders []string          `json:"forward_response_headers,omitempty"`
 	Models                 []string          `json:"models,omitempty"`
@@ -70,11 +71,35 @@ func (c *Config) expandEnvironment() {
 		for key, value := range provider.Headers {
 			provider.Headers[key] = os.ExpandEnv(value)
 		}
+		if provider.Body != nil {
+			provider.Body = expandAny(provider.Body).(map[string]any)
+		}
 		for key, value := range provider.Codex.Environment {
 			provider.Codex.Environment[key] = os.ExpandEnv(value)
 		}
 		provider.Codex.WorkingDirectory = os.ExpandEnv(provider.Codex.WorkingDirectory)
 		provider.Codex.BaseInstructions = os.ExpandEnv(provider.Codex.BaseInstructions)
+	}
+}
+
+func expandAny(value any) any {
+	switch typed := value.(type) {
+	case string:
+		return os.ExpandEnv(typed)
+	case map[string]any:
+		result := make(map[string]any, len(typed))
+		for key, item := range typed {
+			result[key] = expandAny(item)
+		}
+		return result
+	case []any:
+		result := make([]any, len(typed))
+		for index, item := range typed {
+			result[index] = expandAny(item)
+		}
+		return result
+	default:
+		return value
 	}
 }
 

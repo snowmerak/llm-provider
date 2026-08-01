@@ -38,6 +38,14 @@ func TestModelsAndChatRouting(t *testing.T) {
 			if body["model"] != "vendor/model-a" || body["prompt_cache_key"] != "cache-key-1" {
 				t.Errorf("upstream body = %#v", body)
 			}
+			if body["cache_control"].(map[string]any)["type"] != "ephemeral" {
+				t.Errorf("default cache body = %#v", body["cache_control"])
+			}
+			messages := body["messages"].([]any)
+			content := messages[0].(map[string]any)["content"].([]any)
+			if content[0].(map[string]any)["cache_control"].(map[string]any)["type"] != "ephemeral" {
+				t.Errorf("content cache breakpoint = %#v", content)
+			}
 			writer.Header().Set("X-OpenRouter-Cache-Status", "HIT")
 			_, _ = io.WriteString(writer, `{"id":"chat_1","model":"vendor/model-a","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"prompt_tokens_details":{"cached_tokens":8},"completion_tokens":1,"total_tokens":11}}`)
 		default:
@@ -49,6 +57,7 @@ func TestModelsAndChatRouting(t *testing.T) {
 	gateway, err := New(Config{Providers: []ProviderConfig{{
 		ID: "router", Type: "openai-compatible", Prefix: "openrouter", Enabled: true,
 		BaseURL: upstream.URL + "/v1", APIKey: "backend-secret",
+		Body: map[string]any{"cache_control": map[string]any{"type": "ephemeral"}},
 	}}})
 	if err != nil {
 		t.Fatal(err)
@@ -74,7 +83,7 @@ func TestModelsAndChatRouting(t *testing.T) {
 		t.Fatalf("models = %#v", models.Data)
 	}
 
-	body := `{"model":"openrouter/vendor/model-a","messages":[{"role":"user","content":"hello"}],"prompt_cache_key":"cache-key-1"}`
+	body := `{"model":"openrouter/vendor/model-a","messages":[{"role":"user","content":[{"type":"text","text":"hello","cache_control":{"type":"ephemeral"}}]}],"prompt_cache_key":"cache-key-1"}`
 	request, err := http.NewRequest(http.MethodPost, server.URL+"/v1/chat/completions", strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
@@ -150,11 +159,12 @@ func TestStreamingPreservesPrefixedModel(t *testing.T) {
 
 func TestLoadConfigExpandsEnvironment(t *testing.T) {
 	t.Setenv("TEST_GATEWAY_API_KEY", "expanded-secret")
+	t.Setenv("TEST_CACHE_KEY", "tenant:cache-v1")
 	file, err := os.CreateTemp(t.TempDir(), "config-*.json")
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = io.WriteString(file, `{"listen":":8080","providers":[{"id":"local","type":"openai-compatible","enabled":true,"base_url":"http://localhost","api_key":"${TEST_GATEWAY_API_KEY}"}]}`)
+	_, _ = io.WriteString(file, `{"listen":":8080","providers":[{"id":"local","type":"openai-compatible","enabled":true,"base_url":"http://localhost","api_key":"${TEST_GATEWAY_API_KEY}","body":{"prompt_cache_key":"${TEST_CACHE_KEY}","nested":{"value":"${TEST_CACHE_KEY}"}}}]}`)
 	_ = file.Close()
 	config, err := LoadConfig(file.Name())
 	if err != nil {
@@ -162,6 +172,10 @@ func TestLoadConfigExpandsEnvironment(t *testing.T) {
 	}
 	if config.Providers[0].APIKey != "expanded-secret" {
 		t.Fatalf("api key = %q", config.Providers[0].APIKey)
+	}
+	if config.Providers[0].Body["prompt_cache_key"] != "tenant:cache-v1" ||
+		config.Providers[0].Body["nested"].(map[string]any)["value"] != "tenant:cache-v1" {
+		t.Fatalf("expanded body = %#v", config.Providers[0].Body)
 	}
 }
 

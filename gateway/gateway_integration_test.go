@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -9,6 +10,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	llmprovider "github.com/snowmerak/llm-provider"
+	openaiprovider "github.com/snowmerak/llm-provider/providers/openai"
 )
 
 func TestIntegrationModelList(t *testing.T) {
@@ -140,4 +144,85 @@ func TestIntegrationOpenAICompatibleChatEndpoint(t *testing.T) {
 	if response.StatusCode != http.StatusOK || !strings.Contains(string(data), "LOCAL_GATEWAY_OK_247") {
 		t.Fatalf("status = %d: %s", response.StatusCode, data)
 	}
+}
+
+func TestIntegrationCodexDelegatedToolThroughOpenAIProvider(t *testing.T) {
+	if os.Getenv("GATEWAY_CODEX_TOOL_INTEGRATION") == "" {
+		t.Skip("set GATEWAY_CODEX_TOOL_INTEGRATION=1 to test delegated Codex tools")
+	}
+	model := os.Getenv("CODEX_APP_SERVER_INTEGRATION_MODEL")
+	if model == "" {
+		model = "gpt-5.6-luna"
+	}
+	gateway, err := New(Config{Providers: []ProviderConfig{{
+		ID: "codex", Type: "codex-app-server", Prefix: "codex", Enabled: true, Models: []string{model},
+		Codex: CodexConfig{Model: model},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gateway.Close()
+	server := httptest.NewServer(gateway.Handler())
+	defer server.Close()
+	client := llmprovider.New(openaiprovider.New(openaiprovider.WithBaseURL(server.URL + "/v1")))
+	defer client.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	request := llmprovider.ChatRequest{
+		Model: "codex/" + model,
+		Messages: []llmprovider.Message{{
+			Role:    llmprovider.RoleUser,
+			Content: "You must call lookup_gateway_value with key demo. Do not answer before calling it.",
+		}},
+		Tools: []llmprovider.Tool{{
+			Type: llmprovider.ToolTypeFunction,
+			Function: llmprovider.FunctionDefinition{
+				Name: "lookup_gateway_value", Description: "Returns the gateway test value for a key.",
+				Parameters: map[string]any{
+					"type":       "object",
+					"properties": map[string]any{"key": map[string]any{"type": "string"}},
+					"required":   []string{"key"}, "additionalProperties": false,
+				},
+			},
+		}},
+		ToolChoice: llmprovider.ToolChoiceAuto,
+	}
+	first, err := client.Chat(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Choices) == 0 || len(first.Choices[0].Message.ToolCalls) == 0 {
+		t.Fatalf("Codex returned no delegated tool call: %#v", first)
+	}
+	call := first.Choices[0].Message.ToolCalls[0]
+	if call.Function.Name != "lookup_gateway_value" || first.Choices[0].FinishReason != "tool_calls" {
+		t.Fatalf("unexpected delegated call: %#v", first)
+	}
+
+	request.ConversationID = first.ConversationID
+	request.ToolChoice = llmprovider.ToolChoiceNone
+	request.Messages = append(request.Messages, first.Choices[0].Message, llmprovider.Message{
+		Role: llmprovider.RoleTool, ToolCallID: call.ID,
+		Content: `{"value":"CODEX_DELEGATED_TOOL_OK_684"}`,
+	})
+	second, err := client.Chat(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Choices) == 0 ||
+		!strings.Contains(second.Choices[0].Message.Content, "CODEX_DELEGATED_TOOL_OK_684") {
+		t.Fatalf("tool result was not used: %#v", second)
+	}
+	if second.ConversationID != first.ConversationID || second.ID != first.ID {
+		t.Fatalf("delegated tool changed Codex thread/turn: first=%q/%q second=%q/%q",
+			first.ConversationID, first.ID, second.ConversationID, second.ID)
+	}
+	if second.Usage.PromptDetails == nil {
+		t.Fatalf("Codex cache usage details were not exposed: %#v", second.Usage)
+	}
+	t.Logf("Codex cache tokens: read=%d write=%d prompt=%d",
+		second.Usage.PromptDetails.CachedTokens,
+		second.Usage.PromptDetails.CacheWriteTokens,
+		second.Usage.PromptTokens)
 }

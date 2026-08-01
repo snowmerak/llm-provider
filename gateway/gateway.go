@@ -148,6 +148,9 @@ func buildProvider(config ProviderConfig) (llmprovider.Provider, error) {
 		for key, value := range config.Headers {
 			options = append(options, openai.WithHeader(key, value))
 		}
+		for key, value := range config.Body {
+			options = append(options, openai.WithBodyField(key, value))
+		}
 		return openai.New(options...), nil
 	default:
 		return nil, fmt.Errorf("gateway: provider %q has unsupported type %q", config.ID, config.Type)

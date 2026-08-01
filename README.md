@@ -64,7 +64,23 @@ Codex 응답의 `conversation_id`를 다음 요청에 다시 보내면 같은 Ap
 
 추가 header는 Provider의 `forward_headers`에 이름을 등록합니다. `Authorization`, `Content-Type`, `Accept`, `Host`는 전달하지 않고 backend 설정에서 관리합니다.
 
-`prompt_cache_key`, `prompt_cache_options`, `cache_control`처럼 공통 타입에 없는 JSON 필드는 수정하지 않고 선택한 OpenAI-compatible backend로 전달됩니다.
+`prompt_cache_key`, `prompt_cache_options`, `cache_control`, `session_id`처럼 공통 타입에 없는 JSON 필드는 수정하지 않고 선택한 OpenAI-compatible backend로 전달됩니다. Provider 설정의 `body`에는 모든 요청에 적용할 기본 JSON 필드를 넣을 수 있으며, 요청에 같은 필드가 있으면 요청 값이 우선합니다.
+
+```json
+{
+  "headers": {"X-OpenRouter-Cache": "true", "X-OpenRouter-Cache-TTL": "600"},
+  "body": {"cache_control": {"type": "ephemeral", "ttl": "1h"}}
+}
+```
+
+`body` 기본값은 해당 backend가 필드를 지원할 때만 설정합니다. 예를 들어 OpenRouter의 top-level `cache_control`은 provider 선택에 영향을 줄 수 있습니다.
+
+사용할 수 있는 캐시 경로는 다음과 같습니다.
+
+- OpenAI GPT-5.6+: `prompt_cache_key`, `prompt_cache_options`, content block의 `prompt_cache_breakpoint`
+- OpenRouter provider prompt cache: `session_id` 또는 `X-Session-Id`, top-level/개별 block의 `cache_control`
+- OpenRouter response cache: `X-OpenRouter-Cache`, `X-OpenRouter-Cache-TTL`, `X-OpenRouter-Cache-Clear`
+- Grok과 기타 자동 prompt cache backend: system/tool 정의와 대화 prefix를 동일하게 유지
 
 ```bash
 curl http://127.0.0.1:8080/v1/chat/completions \
@@ -74,13 +90,22 @@ curl http://127.0.0.1:8080/v1/chat/completions \
   -d '{
     "model": "openrouter/openai/gpt-5.6",
     "prompt_cache_key": "tenant-a:agent-v3",
-    "messages": [{"role": "user", "content": "Hello"}]
+    "prompt_cache_options": {"mode": "explicit", "ttl": "30m"},
+    "session_id": "conversation-123",
+    "messages": [{
+      "role": "system",
+      "content": [{
+        "type": "text",
+        "text": "Long, stable instructions...",
+        "prompt_cache_breakpoint": {"mode": "explicit"}
+      }]
+    }, {"role": "user", "content": "Hello"}]
   }'
 ```
 
 OpenRouter의 `X-OpenRouter-Cache-Status`, `X-OpenRouter-Cache-Age`, `X-OpenRouter-Cache-TTL`, `X-Generation-Id` 응답 header도 Gateway 응답으로 전달합니다. `cached_tokens`와 `cache_write_tokens`는 `usage.prompt_tokens_details`에 보존됩니다.
 
-Codex App Server는 Gateway가 HTTP 캐시 header를 주입하는 backend가 아닙니다. Codex의 모델 통신과 캐시는 App Server가 관리합니다.
+Codex App Server는 Gateway가 HTTP 캐시 header를 주입하는 backend가 아닙니다. Codex의 모델 통신과 캐시는 App Server가 관리합니다. App Server의 `cachedInputTokens`와 `cacheWriteInputTokens`는 각각 OpenAI 형식의 `cached_tokens`와 `cache_write_tokens`로 변환합니다.
 
 ## Go Provider API
 
@@ -120,7 +145,54 @@ defer client.Close()
 
 System/developer message는 새 Codex thread의 `developerInstructions`로 전달됩니다. 이전 user/assistant/tool message는 `thread/inject_items`로 주입합니다.
 
-Codex dynamic tool은 Go API에서 `ToolHandler`를 제공할 때 App Server의 `item/tool/call`을 통해 실행됩니다. HTTP Gateway의 OpenAI-style tool call은 OpenAI-compatible backend에서는 그대로 동작하지만, Codex backend의 dynamic tool을 외부 클라이언트에 위임하는 프로토콜은 아직 제공하지 않습니다.
+Codex dynamic tool은 두 가지 방식으로 동작합니다.
+
+- `ToolHandler`가 있으면 App Server의 `item/tool/call`을 받아 같은 Codex turn 안에서 실행합니다.
+- `ToolHandler`가 없으면 App Server callback을 OpenAI 형식의 `tool_calls`와 `finish_reason: "tool_calls"`로 호출자에게 위임합니다.
+
+Gateway를 OpenAI Provider로 호출하는 왕복 예시:
+
+```go
+client := llmprovider.New(openai.New(
+    openai.WithBaseURL("http://127.0.0.1:8080/v1"),
+))
+
+request := llmprovider.ChatRequest{
+    Model: "codex/gpt-5.6-luna",
+    Messages: []llmprovider.Message{{
+        Role: llmprovider.RoleUser,
+        Content: "lookup_value를 호출해줘.",
+    }},
+    Tools: []llmprovider.Tool{{
+        Type: llmprovider.ToolTypeFunction,
+        Function: llmprovider.FunctionDefinition{
+            Name: "lookup_value",
+            Parameters: map[string]any{"type": "object"},
+        },
+    }},
+    ToolChoice: llmprovider.ToolChoiceAuto,
+}
+
+first, err := client.Chat(ctx, request)
+call := first.Choices[0].Message.ToolCalls[0]
+
+request.ConversationID = first.ConversationID
+request.ToolChoice = llmprovider.ToolChoiceNone
+request.Messages = append(
+    request.Messages,
+    first.Choices[0].Message,
+    llmprovider.Message{
+        Role: llmprovider.RoleTool,
+        ToolCallID: call.ID,
+        Content: `{"value":"tool result"}`,
+    },
+)
+final, err := client.Chat(ctx, request)
+```
+
+Delegated tool callback은 Gateway 안에 보관됩니다. 호출자가 같은 `conversation_id`와 tool 결과를 보내면 보관 중인 App Server callback에 결과를 전달하므로 같은 Codex thread와 turn이 계속됩니다. 여러 callback이 함께 도착하면 call ID로 결과를 매칭합니다.
+
+Gateway/App Server가 재시작되어 보관 중인 callback을 잃은 경우에는 외부 OpenAI message history를 기준으로 새 Codex thread를 구성하는 fallback을 사용합니다. 이 경우에만 새 `conversation_id`가 반환될 수 있으므로 이후에는 가장 최근 값을 사용해야 합니다.
 
 ## 검증
 
@@ -139,6 +211,10 @@ $env:CODEX_APP_SERVER_INTEGRATION = "1"
 $env:CODEX_APP_SERVER_CHAT_INTEGRATION = "1"
 $env:CODEX_APP_SERVER_INTEGRATION_MODEL = "gpt-5.6-luna"
 go test ./providers/codex -run TestIntegration -v
+
+$env:GATEWAY_OPENAI_COMPAT_CHAT_INTEGRATION = "1"
+$env:GATEWAY_CODEX_TOOL_INTEGRATION = "1"
+go test ./gateway -run TestIntegration -v
 ```
 
-구현은 [OpenAI Chat Completions API](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create), [Function calling](https://developers.openai.com/api/docs/guides/function-calling), [Codex App Server](https://developers.openai.com/codex/app-server/) 문서를 기준으로 합니다.
+구현은 [OpenAI Chat Completions API](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create), [Prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching), [Function calling](https://developers.openai.com/api/docs/guides/function-calling), [Codex App Server](https://developers.openai.com/codex/app-server/), [OpenRouter prompt caching](https://openrouter.ai/docs/guides/best-practices/prompt-caching), [OpenRouter response caching](https://openrouter.ai/docs/guides/features/response-caching) 문서를 기준으로 합니다.

@@ -143,6 +143,10 @@ func (p *Provider) Chat(ctx context.Context, request llmprovider.ChatRequest) (*
 				if choice.Phase == "final_answer" {
 					finalContent += choice.Delta.Content
 				}
+				response.Choices[0].Message.ToolCalls = append(
+					response.Choices[0].Message.ToolCalls,
+					choice.Delta.ToolCalls...,
+				)
 			}
 			if choice.FinishReason != "" {
 				response.Choices[0].FinishReason = choice.FinishReason
@@ -161,22 +165,52 @@ func (p *Provider) Chat(ctx context.Context, request llmprovider.ChatRequest) (*
 
 func (p *Provider) ChatStream(ctx context.Context, request llmprovider.ChatRequest) (llmprovider.Stream, error) {
 	lastUser := lastUserMessage(request.Messages)
-	if lastUser < 0 {
+	hasToolResults := containsToolResult(request.Messages)
+	toolResultContinuation := hasToolResults && request.ToolHandler == nil
+	if lastUser < 0 && !toolResultContinuation {
 		return nil, errors.New("codex: at least one user message is required")
 	}
-	if lastUser != len(request.Messages)-1 {
+	if !toolResultContinuation && lastUser != len(request.Messages)-1 {
 		return nil, errors.New("codex: the last message must have the user role")
 	}
 	if err := p.ensureStarted(ctx); err != nil {
 		return nil, err
 	}
+	if toolResultContinuation && request.ConversationID != "" {
+		if stream, resumed, err := p.resumeDelegatedTurn(ctx, request); resumed || err != nil {
+			return stream, err
+		}
+	}
 
-	threadID, isNew, err := p.prepareThread(ctx, request)
+	threadRequest := request
+	if toolResultContinuation {
+		// The previous App Server turn was interrupted while its dynamic-tool
+		// callback was delegated. Rebuild from the caller's canonical OpenAI
+		// message history so the interrupted callback result cannot conflict
+		// with the externally supplied tool output.
+		threadRequest.ConversationID = ""
+	}
+	threadID, isNew, err := p.prepareThread(ctx, threadRequest)
 	if err != nil {
 		return nil, err
 	}
+	var history []llmprovider.Message
+	var turnInput string
+	if lastUser >= 0 {
+		history = request.Messages[:lastUser]
+		turnInput = request.Messages[lastUser].TextContent()
+	}
+	if toolResultContinuation {
+		if lastUser == len(request.Messages)-1 {
+			history = request.Messages[:lastUser]
+			turnInput = request.Messages[lastUser].TextContent()
+		} else {
+			history = request.Messages
+			turnInput = "Continue the response using the supplied function result."
+		}
+	}
 	if isNew {
-		if err := p.injectHistory(ctx, threadID, request.Messages[:lastUser]); err != nil {
+		if err := p.injectHistory(ctx, threadID, history); err != nil {
 			return nil, err
 		}
 	}
@@ -192,7 +226,7 @@ func (p *Provider) ChatStream(ctx context.Context, request llmprovider.ChatReque
 
 	params := map[string]any{
 		"threadId": threadID,
-		"input":    []map[string]any{{"type": "text", "text": request.Messages[lastUser].Content}},
+		"input":    []map[string]any{{"type": "text", "text": turnInput}},
 	}
 	if model := firstNonEmpty(request.Model, p.config.model); model != "" {
 		params["model"] = model
@@ -227,7 +261,33 @@ func (p *Provider) ChatStream(ctx context.Context, request llmprovider.ChatReque
 	p.mu.Lock()
 	p.turns[response.Turn.ID] = state
 	p.mu.Unlock()
-	return &codexStream{state: state}, nil
+	return &codexStream{state: state, ctx: ctx}, nil
+}
+
+func (p *Provider) resumeDelegatedTurn(ctx context.Context, request llmprovider.ChatRequest) (llmprovider.Stream, bool, error) {
+	p.mu.Lock()
+	state := p.active[request.ConversationID]
+	p.mu.Unlock()
+	if state == nil || !state.isAwaitingTools() {
+		return nil, false, nil
+	}
+	pending, results, err := state.resumeWithToolResults(request.Messages)
+	if err != nil {
+		return nil, true, err
+	}
+	for index, item := range pending {
+		if err := p.respondToServer(item.requestID, map[string]any{
+			"success": true,
+			"contentItems": []map[string]any{{
+				"type": "inputText", "text": results[index].TextContent(),
+			}},
+		}, nil); err != nil {
+			state.finish(err)
+			p.removeTurn(state)
+			return nil, true, err
+		}
+	}
+	return &codexStream{state: state, ctx: ctx}, true, nil
 }
 
 func (p *Provider) prepareThread(ctx context.Context, request llmprovider.ChatRequest) (string, bool, error) {
@@ -301,27 +361,32 @@ func (p *Provider) dynamicTools(request llmprovider.ChatRequest) ([]map[string]a
 	if !p.config.experimentalAPI {
 		return nil, false, errors.New("codex: dynamic tools require the experimental API capability")
 	}
+	var namedChoice string
 	switch choice := request.ToolChoice.(type) {
 	case nil:
 	case llmprovider.ToolChoiceMode:
 		if choice == llmprovider.ToolChoiceNone {
 			return []map[string]any{}, true, nil
 		}
-		if choice != "" && choice != llmprovider.ToolChoiceAuto {
-			return nil, false, fmt.Errorf("codex: tool choice %q is not supported; use auto or none", choice)
+		if choice != "" && choice != llmprovider.ToolChoiceAuto && choice != llmprovider.ToolChoiceRequired {
+			return nil, false, fmt.Errorf("codex: tool choice %q is not supported", choice)
 		}
 	case string:
 		if choice == string(llmprovider.ToolChoiceNone) {
 			return []map[string]any{}, true, nil
 		}
-		if choice != "" && choice != string(llmprovider.ToolChoiceAuto) {
-			return nil, false, fmt.Errorf("codex: tool choice %q is not supported; use auto or none", choice)
+		if choice != "" && choice != string(llmprovider.ToolChoiceAuto) &&
+			choice != string(llmprovider.ToolChoiceRequired) {
+			return nil, false, fmt.Errorf("codex: tool choice %q is not supported", choice)
 		}
+	case map[string]any:
+		name, err := namedToolChoice(choice)
+		if err != nil {
+			return nil, false, err
+		}
+		namedChoice = name
 	default:
-		return nil, false, errors.New("codex: named or structured tool choice is not supported")
-	}
-	if request.ToolHandler == nil {
-		return nil, false, errors.New("codex: ToolHandler is required when dynamic tools are provided")
+		return nil, false, errors.New("codex: invalid structured tool choice")
 	}
 	tools := make([]map[string]any, 0, len(request.Tools))
 	for _, tool := range request.Tools {
@@ -330,6 +395,9 @@ func (p *Provider) dynamicTools(request llmprovider.ChatRequest) ([]map[string]a
 		}
 		if tool.Function.Name == "" {
 			return nil, false, errors.New("codex: tool function name is required")
+		}
+		if namedChoice != "" && tool.Function.Name != namedChoice {
+			continue
 		}
 		description := tool.Function.Description
 		if description == "" {
@@ -344,7 +412,27 @@ func (p *Provider) dynamicTools(request llmprovider.ChatRequest) ([]map[string]a
 			"description": description, "inputSchema": inputSchema,
 		})
 	}
+	if namedChoice != "" && len(tools) == 0 {
+		return nil, false, fmt.Errorf("codex: named tool %q is not present in tools", namedChoice)
+	}
 	return tools, true, nil
+}
+
+func namedToolChoice(choice map[string]any) (string, error) {
+	if choice["type"] != "function" {
+		return "", errors.New("codex: structured tool choice must have type function")
+	}
+	var name string
+	switch function := choice["function"].(type) {
+	case map[string]any:
+		name, _ = function["name"].(string)
+	case map[string]string:
+		name = function["name"]
+	}
+	if name == "" {
+		return "", errors.New("codex: structured tool choice requires function.name")
+	}
+	return name, nil
 }
 
 type threadResponse struct {
@@ -361,7 +449,7 @@ func (p *Provider) injectHistory(ctx context.Context, threadID string, messages 
 		}
 		if message.Role == llmprovider.RoleTool {
 			items = append(items, map[string]any{
-				"type": "function_call_output", "call_id": message.ToolCallID, "output": message.Content,
+				"type": "function_call_output", "call_id": message.ToolCallID, "output": message.TextContent(),
 			})
 			continue
 		}
@@ -372,11 +460,11 @@ func (p *Provider) injectHistory(ctx context.Context, threadID string, messages 
 		} else if message.Role != llmprovider.RoleUser {
 			role = "user"
 		}
-		if message.Content != "" {
+		if text := message.TextContent(); text != "" {
 			items = append(items, map[string]any{
 				"type":    "message",
 				"role":    role,
-				"content": []map[string]any{{"type": contentType, "text": message.Content}},
+				"content": []map[string]any{{"type": contentType, "text": text}},
 			})
 		}
 		for _, call := range message.ToolCalls {
@@ -570,11 +658,17 @@ func (p *Provider) handleDynamicToolCall(message wireMessage) {
 	}
 	p.mu.Unlock()
 	result := llmprovider.ToolResult{IsError: true, Content: "no handler for dynamic tool call"}
-	if state != nil && state.toolHandler != nil {
-		call := llmprovider.ToolCall{
-			ID: params.CallID, Type: llmprovider.ToolTypeFunction,
-			Function: llmprovider.FunctionCall{Name: params.Tool, Arguments: string(params.Arguments)},
+	call := llmprovider.ToolCall{
+		ID: params.CallID, Type: llmprovider.ToolTypeFunction,
+		Function: llmprovider.FunctionCall{Name: params.Tool, Arguments: string(params.Arguments)},
+	}
+	if state != nil && state.toolHandler == nil {
+		state.setTurnIDIfEmpty(params.TurnID)
+		if state.addDelegatedTool(call, message.ID) {
+			return
 		}
+	}
+	if state != nil && state.toolHandler != nil {
 		value, err := state.toolHandler(state.ctx, call)
 		if err != nil {
 			result = llmprovider.ToolResult{IsError: true, Content: err.Error()}
@@ -588,7 +682,7 @@ func (p *Provider) handleDynamicToolCall(message wireMessage) {
 	}, nil)
 }
 
-func (p *Provider) respondToServer(id json.RawMessage, result any, responseErr error) {
+func (p *Provider) respondToServer(id json.RawMessage, result any, responseErr error) error {
 	response := map[string]any{"id": json.RawMessage(id)}
 	if responseErr != nil {
 		response["error"] = map[string]any{"code": -32601, "message": responseErr.Error()}
@@ -596,9 +690,13 @@ func (p *Provider) respondToServer(id json.RawMessage, result any, responseErr e
 		response["result"] = result
 	}
 	data, err := json.Marshal(response)
-	if err == nil {
-		_ = p.transport.WriteMessage(data)
+	if err != nil {
+		return fmt.Errorf("codex: encode server response: %w", err)
 	}
+	if err := p.transport.WriteMessage(data); err != nil {
+		return fmt.Errorf("codex: write server response: %w", err)
+	}
+	return nil
 }
 
 func (p *Provider) handleNotification(method string, params json.RawMessage) {
@@ -667,14 +765,22 @@ func (p *Provider) handleNotification(method string, params json.RawMessage) {
 		var event struct {
 			TokenUsage struct {
 				Last struct {
-					InputTokens  int `json:"inputTokens"`
-					OutputTokens int `json:"outputTokens"`
-					TotalTokens  int `json:"totalTokens"`
+					InputTokens           int `json:"inputTokens"`
+					CachedInputTokens     int `json:"cachedInputTokens"`
+					CacheWriteInputTokens int `json:"cacheWriteInputTokens"`
+					OutputTokens          int `json:"outputTokens"`
+					TotalTokens           int `json:"totalTokens"`
 				} `json:"last"`
 			} `json:"tokenUsage"`
 		}
 		if json.Unmarshal(params, &event) == nil {
-			state.setUsage(llmprovider.Usage{PromptTokens: event.TokenUsage.Last.InputTokens, CompletionTokens: event.TokenUsage.Last.OutputTokens, TotalTokens: event.TokenUsage.Last.TotalTokens})
+			last := event.TokenUsage.Last
+			state.setUsage(llmprovider.Usage{
+				PromptTokens: last.InputTokens, CompletionTokens: last.OutputTokens, TotalTokens: last.TotalTokens,
+				PromptDetails: &llmprovider.TokenDetails{
+					CachedTokens: last.CachedInputTokens, CacheWriteTokens: last.CacheWriteInputTokens,
+				},
+			})
 		}
 	case "error":
 		var event struct {
@@ -788,7 +894,7 @@ func developerInstructions(messages []llmprovider.Message) string {
 	var instructions []string
 	for _, message := range messages {
 		if message.Role == llmprovider.RoleSystem || message.Role == llmprovider.RoleDeveloper {
-			instructions = append(instructions, message.Content)
+			instructions = append(instructions, message.TextContent())
 		}
 	}
 	return strings.Join(instructions, "\n\n")
@@ -801,6 +907,15 @@ func lastUserMessage(messages []llmprovider.Message) int {
 		}
 	}
 	return -1
+}
+
+func containsToolResult(messages []llmprovider.Message) bool {
+	for _, message := range messages {
+		if message.Role == llmprovider.RoleTool {
+			return true
+		}
+	}
+	return false
 }
 
 func firstNonEmpty(values ...string) string {

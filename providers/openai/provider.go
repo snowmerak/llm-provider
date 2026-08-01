@@ -24,6 +24,7 @@ type config struct {
 	apiKey     string
 	httpClient *http.Client
 	headers    http.Header
+	body       map[string]any
 }
 
 type Option func(*config)
@@ -48,6 +49,18 @@ func WithHeader(key, value string) Option {
 	return func(c *config) { c.headers.Set(key, value) }
 }
 
+// WithBodyField sets a provider-level default request field. Request-scoped
+// Extra values override it, and typed ChatRequest fields remain authoritative.
+// This supports provider extensions such as cache_control,
+// prompt_cache_options, provider routing, and session_id.
+func WithBodyField(key string, value any) Option {
+	return func(c *config) {
+		if key != "" {
+			c.body[key] = value
+		}
+	}
+}
+
 type Provider struct {
 	config config
 }
@@ -62,6 +75,7 @@ func New(opts ...Option) *Provider {
 		apiKey:     os.Getenv("OPENAI_API_KEY"),
 		httpClient: http.DefaultClient,
 		headers:    make(http.Header),
+		body:       make(map[string]any),
 	}
 	for _, opt := range opts {
 		opt(&config)
@@ -120,13 +134,19 @@ func (p *Provider) do(ctx context.Context, request llmprovider.ChatRequest, stre
 	if len(request.Messages) == 0 {
 		return nil, errors.New("openai: at least one message is required")
 	}
-	payload := make(map[string]any, len(request.Extra)+12)
+	payload := make(map[string]any, len(p.config.body)+len(request.Extra)+12)
+	for key, value := range p.config.body {
+		payload[key] = value
+	}
 	for key, value := range request.Extra {
 		payload[key] = value
 	}
 	payload["model"] = request.Model
 	payload["messages"] = request.Messages
 	payload["stream"] = stream
+	if request.ConversationID != "" {
+		payload["conversation_id"] = request.ConversationID
+	}
 	setOptional(payload, "temperature", request.Temperature)
 	setOptional(payload, "top_p", request.TopP)
 	setOptional(payload, "max_tokens", request.MaxTokens)
