@@ -80,7 +80,8 @@ Codex 응답의 `conversation_id`를 다음 요청에 다시 보내면 같은 Ap
 - OpenAI GPT-5.6+: `prompt_cache_key`, `prompt_cache_options`, content block의 `prompt_cache_breakpoint`
 - OpenRouter provider prompt cache: `session_id` 또는 `X-Session-Id`, top-level/개별 block의 `cache_control`
 - OpenRouter response cache: `X-OpenRouter-Cache`, `X-OpenRouter-Cache-TTL`, `X-OpenRouter-Cache-Clear`
-- Grok과 기타 자동 prompt cache backend: system/tool 정의와 대화 prefix를 동일하게 유지
+- Grok: 요청별로 안정적인 `X-Grok-Conv-Id`를 보내고 system/tool 정의와 대화 prefix를 동일하게 유지. cache read는 `usage.prompt_tokens_details.cached_tokens`로 확인
+- 기타 자동 prompt cache backend: system/tool 정의와 대화 prefix를 동일하게 유지
 
 ```bash
 curl http://127.0.0.1:8080/v1/chat/completions \
@@ -215,6 +216,10 @@ go test ./providers/codex -run TestIntegration -v
 $env:GATEWAY_OPENAI_COMPAT_CHAT_INTEGRATION = "1"
 $env:GATEWAY_CODEX_TOOL_INTEGRATION = "1"
 go test ./gateway -run TestIntegration -v
+
+$env:GATEWAY_GROK_INTEGRATION = "1"
+$env:GROK_INTEGRATION_MODEL = "grok-4.5"
+go test ./gateway -run TestIntegrationGrokFromConfigThroughOpenAIProvider -v
 ```
 
-구현은 [OpenAI Chat Completions API](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create), [Prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching), [Function calling](https://developers.openai.com/api/docs/guides/function-calling), [Codex App Server](https://developers.openai.com/codex/app-server/), [OpenRouter prompt caching](https://openrouter.ai/docs/guides/best-practices/prompt-caching), [OpenRouter response caching](https://openrouter.ai/docs/guides/features/response-caching) 문서를 기준으로 합니다.
+구현은 [OpenAI Chat Completions API](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create), [Prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching), [Function calling](https://developers.openai.com/api/docs/guides/function-calling), [Codex App Server](https://developers.openai.com/codex/app-server/), [OpenRouter prompt caching](https://openrouter.ai/docs/guides/best-practices/prompt-caching), [OpenRouter response caching](https://openrouter.ai/docs/guides/features/response-caching), [xAI prompt caching](https://docs.x.ai/developers/advanced-api-usage/prompt-caching) 문서를 기준으로 합니다.

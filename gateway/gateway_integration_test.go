@@ -226,3 +226,77 @@ func TestIntegrationCodexDelegatedToolThroughOpenAIProvider(t *testing.T) {
 		second.Usage.PromptDetails.CacheWriteTokens,
 		second.Usage.PromptTokens)
 }
+
+func TestIntegrationGrokFromConfigThroughOpenAIProvider(t *testing.T) {
+	if os.Getenv("GATEWAY_GROK_INTEGRATION") == "" {
+		t.Skip("set GATEWAY_GROK_INTEGRATION=1 to test the configured Grok provider")
+	}
+	configPath := os.Getenv("GATEWAY_CONFIG_PATH")
+	if configPath == "" {
+		configPath = "../llm-provider.json"
+	}
+	config, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := os.Getenv("GROK_INTEGRATION_MODEL")
+	if model == "" {
+		model = "grok-4.5"
+	}
+	found := false
+	for index := range config.Providers {
+		if config.Providers[index].ID != "grok" {
+			continue
+		}
+		config.Providers[index].Enabled = true
+		config.Providers[index].Models = []string{model}
+		found = true
+	}
+	if !found {
+		t.Fatal("llm-provider.json has no grok provider")
+	}
+
+	gateway, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gateway.Close()
+	server := httptest.NewServer(gateway.Handler())
+	defer server.Close()
+	client := llmprovider.New(openaiprovider.New(openaiprovider.WithBaseURL(server.URL + "/v1")))
+	defer client.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	cacheConversationID := "llm-provider-grok-cache-527"
+	stablePrefix := strings.Repeat("This is stable reference context for prompt-cache verification. ", 128)
+	request := llmprovider.ChatRequest{
+		Model: "grok/" + model,
+		Messages: []llmprovider.Message{
+			{Role: llmprovider.RoleSystem, Content: stablePrefix + " Include the exact token GROK_GATEWAY_OK_527 in the answer."},
+			{Role: llmprovider.RoleUser, Content: "Follow the system instruction now."},
+		},
+		Headers: http.Header{"X-Grok-Conv-Id": []string{cacheConversationID}},
+	}
+	response, err := client.Chat(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Choices) == 0 ||
+		!strings.Contains(response.Choices[0].Message.Content, "GROK_GATEWAY_OK_527") {
+		t.Fatalf("Grok gateway response = %#v", response)
+	}
+
+	request.Messages = append(request.Messages, response.Choices[0].Message, llmprovider.Message{
+		Role: llmprovider.RoleUser, Content: "Repeat only the required token.",
+	})
+	second, err := client.Chat(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Usage.PromptDetails == nil || second.Usage.PromptDetails.CachedTokens <= 0 {
+		t.Fatalf("Grok prompt cache did not report a hit: %#v", second.Usage)
+	}
+	t.Logf("Grok cache tokens: read=%d prompt=%d",
+		second.Usage.PromptDetails.CachedTokens, second.Usage.PromptTokens)
+}
