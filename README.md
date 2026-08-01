@@ -201,6 +201,30 @@ Gateway/App Server가 재시작되어 보관 중인 callback을 잃은 경우에
 go test ./...
 ```
 
+### 캐시 회귀 테스트
+
+외부 API 비용이 드는 캐시 적중률 테스트는 `tests/cache_hitrate_test.go`에 있으며 기본 `go test ./...`에서는 skip됩니다. [Task](https://taskfile.dev/)로 provider별 또는 전체 테스트를 명시적으로 실행합니다.
+
+```powershell
+task test
+task cache:codex
+task cache:grok
+task cache:openrouter
+task cache:openai-compatible
+task cache:all
+```
+
+기본 통과 기준은 `cached_tokens / prompt_tokens >= 0.50`입니다. 전체 또는 provider별 기준을 조정할 수 있습니다.
+
+```powershell
+task cache:all CACHE_MIN_HIT_RATE=0.80
+
+$env:CACHE_MIN_HIT_RATE_CODEX = "0.90"
+task cache:codex
+```
+
+`task regression`은 로컬 테스트와 `go vet`을 실행한 뒤 실제 provider 캐시 회귀를 순차 실행합니다. 다른 설정 파일을 사용하려면 `GATEWAY_CONFIG_PATH`를 지정합니다.
+
 실제 backend 통합 테스트:
 
 ```powershell

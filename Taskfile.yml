@@ -1,0 +1,68 @@
+version: "3"
+
+vars:
+  CACHE_MIN_HIT_RATE: '{{default "0.50" .CACHE_MIN_HIT_RATE}}'
+
+tasks:
+  default:
+    desc: Run the local regression suite
+    cmds:
+      - task: test
+
+  test:
+    desc: Run unit and integration-gated tests without external API calls
+    cmds:
+      - go test ./...
+
+  vet:
+    desc: Run Go static analysis
+    cmds:
+      - go vet ./...
+
+  regression:
+    desc: Run local tests, vet, and every external cache regression sequentially
+    cmds:
+      - task: test
+      - task: vet
+      - task: cache:all
+
+  cache:codex:
+    desc: Check Codex delegated-tool cache hit rate and thread continuity
+    env:
+      CACHE_REGRESSION_CODEX: "1"
+      CACHE_MIN_HIT_RATE: "{{.CACHE_MIN_HIT_RATE}}"
+    cmds:
+      - go test ./tests -run 'TestCacheHitRate/Codex$' -v -count=1
+
+  cache:grok:
+    desc: Check Grok prompt-cache hit rate through the configured Gateway
+    env:
+      CACHE_REGRESSION_GROK: "1"
+      CACHE_MIN_HIT_RATE: "{{.CACHE_MIN_HIT_RATE}}"
+    cmds:
+      - go test ./tests -run 'TestCacheHitRate/Grok$' -v -count=1
+
+  cache:openrouter:
+    desc: Check OpenRouter provider prompt cache and response cache
+    env:
+      CACHE_REGRESSION_OPENROUTER: "1"
+      CACHE_MIN_HIT_RATE: "{{.CACHE_MIN_HIT_RATE}}"
+    cmds:
+      - go test ./tests -run 'TestCacheHitRate/OpenRouter$' -v -count=1
+
+  cache:openai-compatible:
+    desc: Check the configured macmini OpenAI-compatible cache hit rate
+    env:
+      CACHE_REGRESSION_OPENAI_COMPATIBLE: "1"
+      CACHE_MIN_HIT_RATE: "{{.CACHE_MIN_HIT_RATE}}"
+    cmds:
+      - go test ./tests -run 'TestCacheHitRate/OpenAICompatible$' -v -count=1
+
+  cache:all:
+    desc: Run all external cache regressions sequentially
+    cmds:
+      - task: cache:codex
+      - task: cache:grok
+      - task: cache:openrouter
+      - task: cache:openai-compatible
+
