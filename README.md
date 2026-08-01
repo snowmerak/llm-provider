@@ -2,7 +2,7 @@
 
 여러 LLM backend를 하나의 Go 인터페이스와 OpenAI-compatible HTTP endpoint로 제공하는 프로젝트입니다.
 
-- OpenAI-compatible backend와 OpenRouter, xAI/Grok
+- OpenAI-compatible backend와 OpenRouter, xAI/Grok, Anthropic Claude
 - 로컬 `codex app-server --listen stdio://`
 - `GET /v1/models`와 `POST /v1/chat/completions`
 - 일반 응답, SSE streaming, function tool calling
@@ -16,6 +16,7 @@ Gateway는 설정에서 활성화한 Provider만 생성합니다. 외부 모델 
 | 외부 모델 ID | 실제 backend | backend에 전달되는 모델 |
 |---|---|---|
 | `codex/gpt-5.6-luna` | `codex app-server` | `gpt-5.6-luna` |
+| `claude/claude-sonnet-5` | Anthropic Messages API | `claude-sonnet-5` |
 | `openrouter/anthropic/claude-sonnet-4` | OpenRouter | `anthropic/claude-sonnet-4` |
 | `local/gpt-5.6-luna` | `http://macmini:11888/v1` | `gpt-5.6-luna` |
 | `grok/grok-4.5` | xAI | `grok-4.5` |
@@ -78,6 +79,7 @@ Codex 응답의 `conversation_id`를 다음 요청에 다시 보내면 같은 Ap
 사용할 수 있는 캐시 경로는 다음과 같습니다.
 
 - OpenAI GPT-5.6+: `prompt_cache_key`, `prompt_cache_options`, content block의 `prompt_cache_breakpoint`
+- Anthropic Claude: top-level 또는 content block의 `cache_control`; `cache_read_input_tokens`와 `cache_creation_input_tokens`는 공통 cache usage로 변환
 - OpenRouter provider prompt cache: `session_id` 또는 `X-Session-Id`, top-level/개별 block의 `cache_control`
 - OpenRouter response cache: `X-OpenRouter-Cache`, `X-OpenRouter-Cache-TTL`, `X-OpenRouter-Cache-Clear`
 - Grok: 요청별로 안정적인 `X-Grok-Conv-Id`를 보내고 system/tool 정의와 대화 prefix를 동일하게 유지. cache read는 `usage.prompt_tokens_details.cached_tokens`로 확인
@@ -195,6 +197,23 @@ Delegated tool callback은 Gateway 안에 보관됩니다. 호출자가 같은 `
 
 Gateway/App Server가 재시작되어 보관 중인 callback을 잃은 경우에는 외부 OpenAI message history를 기준으로 새 Codex thread를 구성하는 fallback을 사용합니다. 이 경우에만 새 `conversation_id`가 반환될 수 있으므로 이후에는 가장 최근 값을 사용해야 합니다.
 
+### Anthropic Claude
+
+`type: "anthropic"` provider는 공통 Chat 요청을 Claude Messages API로 변환합니다. system/developer message는 top-level `system`으로, function tool은 `tool_use`/`tool_result`로 변환하며 SSE streaming도 지원합니다.
+
+```json
+{
+  "id": "claude",
+  "type": "anthropic",
+  "prefix": "claude",
+  "enabled": true,
+  "api_key_env": "CLAUDE_API_KEY",
+  "models": ["claude-sonnet-5"]
+}
+```
+
+Claude Sonnet 5는 adaptive thinking을 기본 사용하며 비기본 `temperature`와 `top_p`를 허용하지 않습니다. 명시적인 prompt cache는 system 또는 message content block에 `cache_control: {"type":"ephemeral","ttl":"5m"}`을 넣어 사용합니다.
+
 ## 검증
 
 ```bash
@@ -208,6 +227,7 @@ go test ./...
 ```powershell
 task test
 task cache:codex
+task cache:claude
 task cache:grok
 task cache:openrouter
 task cache:openai-compatible
@@ -250,4 +270,4 @@ $env:OPENROUTER_INTEGRATION_MODEL = "openai/gpt-4.1-mini"
 go test ./gateway -run TestIntegrationOpenRouterFromConfigThroughOpenAIProvider -v
 ```
 
-구현은 [OpenAI Chat Completions API](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create), [Prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching), [Function calling](https://developers.openai.com/api/docs/guides/function-calling), [Codex App Server](https://developers.openai.com/codex/app-server/), [OpenRouter prompt caching](https://openrouter.ai/docs/guides/best-practices/prompt-caching), [OpenRouter response caching](https://openrouter.ai/docs/guides/features/response-caching), [xAI prompt caching](https://docs.x.ai/developers/advanced-api-usage/prompt-caching) 문서를 기준으로 합니다.
+구현은 [OpenAI Chat Completions API](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create), [Prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching), [Function calling](https://developers.openai.com/api/docs/guides/function-calling), [Codex App Server](https://developers.openai.com/codex/app-server/), [Claude Messages API](https://platform.claude.com/docs/en/api/messages/create), [Claude prompt caching](https://platform.claude.com/docs/en/build-with-claude/prompt-caching), [OpenRouter prompt caching](https://openrouter.ai/docs/guides/best-practices/prompt-caching), [OpenRouter response caching](https://openrouter.ai/docs/guides/features/response-caching), [xAI prompt caching](https://docs.x.ai/developers/advanced-api-usage/prompt-caching) 문서를 기준으로 합니다.

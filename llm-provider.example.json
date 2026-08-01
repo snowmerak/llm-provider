@@ -32,12 +32,18 @@
       }
     },
     {
+      "id": "claude",
+      "type": "anthropic",
+      "prefix": "claude",
+      "enabled": false,
+      "api_key_env": "CLAUDE_API_KEY"
+    },
+    {
       "id": "local",
       "type": "openai-compatible",
       "prefix": "local",
       "enabled": true,
-      "base_url": "http://macmini:11888/v1",
-      "models": ["gpt-5.6-luna"]
+      "base_url": "http://macmini:11888/v1"
     },
     {
       "id": "grok",

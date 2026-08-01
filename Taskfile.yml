@@ -42,6 +42,14 @@ tasks:
     cmds:
       - go test ./tests -run 'TestCacheHitRate/Grok$' -v -count=1
 
+  cache:claude:
+    desc: Check Claude tool calling and explicit prompt-cache hit rate
+    env:
+      CACHE_REGRESSION_CLAUDE: "1"
+      CACHE_MIN_HIT_RATE: "{{.CACHE_MIN_HIT_RATE}}"
+    cmds:
+      - go test ./tests -run 'TestCacheHitRate/Claude$' -v -count=1
+
   cache:openrouter:
     desc: Check OpenRouter provider prompt cache and response cache
     env:
@@ -62,7 +70,7 @@ tasks:
     desc: Run all external cache regressions sequentially
     cmds:
       - task: cache:codex
+      - task: cache:claude
       - task: cache:grok
       - task: cache:openrouter
       - task: cache:openai-compatible
-

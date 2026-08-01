@@ -118,7 +118,7 @@ func (p ProviderConfig) validate() error {
 		return fmt.Errorf("provider %q prefix %q contains '/'", p.ID, prefix)
 	}
 	switch p.Type {
-	case "codex", "codex-app-server", "openrouter", "openai-compatible":
+	case "anthropic", "claude", "codex", "codex-app-server", "openrouter", "openai-compatible":
 	default:
 		return fmt.Errorf("provider %q has unsupported type %q", p.ID, p.Type)
 	}

@@ -21,9 +21,85 @@ const defaultMinimumCacheHitRate = 0.50
 
 func TestCacheHitRate(t *testing.T) {
 	t.Run("Codex", testCodexCacheHitRate)
+	t.Run("Claude", testClaudeCacheHitRate)
 	t.Run("Grok", testGrokCacheHitRate)
 	t.Run("OpenRouter", testOpenRouterCacheHitRate)
 	t.Run("OpenAICompatible", testOpenAICompatibleCacheHitRate)
+}
+
+func testClaudeCacheHitRate(t *testing.T) {
+	requireRegressionEnabled(t, "CLAUDE")
+	client, model, closeGateway := configuredGatewayClient(t, "claude", "CLAUDE_CACHE_MODEL", "claude-sonnet-5")
+	defer closeGateway()
+	defer client.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	toolRequest := llmprovider.ChatRequest{
+		Model: model,
+		Messages: []llmprovider.Message{{
+			Role:    llmprovider.RoleUser,
+			Content: "Call claude_cache_regression_lookup with key demo before answering.",
+		}},
+		Tools: []llmprovider.Tool{{
+			Type: llmprovider.ToolTypeFunction,
+			Function: llmprovider.FunctionDefinition{
+				Name: "claude_cache_regression_lookup", Description: "Returns a Claude regression marker.",
+				Parameters: map[string]any{
+					"type": "object", "properties": map[string]any{"key": map[string]any{"type": "string"}},
+					"required": []string{"key"}, "additionalProperties": false,
+				},
+			},
+		}},
+		ToolChoice: llmprovider.NamedToolChoice("claude_cache_regression_lookup"),
+	}
+	toolCallResponse, err := client.Chat(ctx, toolRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(toolCallResponse.Choices) == 0 || len(toolCallResponse.Choices[0].Message.ToolCalls) == 0 {
+		t.Fatalf("Claude returned no tool call: %#v", toolCallResponse)
+	}
+	call := toolCallResponse.Choices[0].Message.ToolCalls[0]
+	toolRequest.ToolChoice = llmprovider.ToolChoiceAuto
+	toolRequest.Messages = append(toolRequest.Messages, toolCallResponse.Choices[0].Message, llmprovider.Message{
+		Role: llmprovider.RoleTool, ToolCallID: call.ID,
+		Content: `{"value":"CLAUDE_TOOL_REGRESSION_OK"}`,
+	})
+	toolFinal, err := client.Chat(ctx, toolRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(toolFinal.Choices) == 0 ||
+		!strings.Contains(toolFinal.Choices[0].Message.Content, "CLAUDE_TOOL_REGRESSION_OK") {
+		t.Fatalf("Claude did not use the tool result: %#v", toolFinal)
+	}
+
+	cacheRequest := llmprovider.ChatRequest{
+		Model: model,
+		Messages: []llmprovider.Message{
+			{
+				Role: llmprovider.RoleSystem,
+				ContentParts: []llmprovider.MessageContentPart{{
+					"type": "text", "text": stablePrefix("claude"),
+					"cache_control": map[string]any{"type": "ephemeral", "ttl": "5m"},
+				}},
+			},
+			{Role: llmprovider.RoleUser, Content: "Reply with exactly CLAUDE_CACHE_WARMUP."},
+		},
+	}
+	warmup, err := client.Chat(ctx, cacheRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cacheRequest.Messages = append(cacheRequest.Messages, warmup.Choices[0].Message, llmprovider.Message{
+		Role: llmprovider.RoleUser, Content: "Reply with exactly CLAUDE_CACHE_PROBE.",
+	})
+	probe, err := client.Chat(ctx, cacheRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireCacheHitRate(t, "CLAUDE", probe.Usage)
 }
 
 func testCodexCacheHitRate(t *testing.T) {

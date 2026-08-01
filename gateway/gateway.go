@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	llmprovider "github.com/snowmerak/llm-provider"
+	"github.com/snowmerak/llm-provider/providers/anthropic"
 	"github.com/snowmerak/llm-provider/providers/codex"
 	"github.com/snowmerak/llm-provider/providers/openai"
 )
@@ -21,6 +22,7 @@ var defaultRequestHeaders = []string{
 	"X-OpenRouter-Cache-Clear",
 	"X-Session-Id",
 	"X-Grok-Conv-Id",
+	"Anthropic-Beta",
 }
 
 var defaultResponseHeaders = []string{
@@ -28,6 +30,7 @@ var defaultResponseHeaders = []string{
 	"X-OpenRouter-Cache-Age",
 	"X-OpenRouter-Cache-TTL",
 	"X-Generation-Id",
+	"Request-Id",
 }
 
 type route struct {
@@ -86,6 +89,28 @@ func New(config Config) (*Gateway, error) {
 
 func buildProvider(config ProviderConfig) (llmprovider.Provider, error) {
 	switch config.Type {
+	case "anthropic", "claude":
+		apiKey := config.APIKey
+		if config.APIKeyEnv != "" {
+			apiKey = os.Getenv(config.APIKeyEnv)
+			if apiKey == "" {
+				return nil, fmt.Errorf("gateway: provider %q environment variable %s is empty", config.ID, config.APIKeyEnv)
+			}
+		}
+		if apiKey == "" {
+			return nil, fmt.Errorf("gateway: provider %q requires api_key or api_key_env", config.ID)
+		}
+		options := []anthropic.Option{anthropic.WithAPIKey(apiKey)}
+		if config.BaseURL != "" {
+			options = append(options, anthropic.WithBaseURL(config.BaseURL))
+		}
+		for key, value := range config.Headers {
+			options = append(options, anthropic.WithHeader(key, value))
+		}
+		for key, value := range config.Body {
+			options = append(options, anthropic.WithBodyField(key, value))
+		}
+		return anthropic.New(options...), nil
 	case "codex", "codex-app-server":
 		options := make([]codex.Option, 0, 10)
 		codexConfig := config.Codex
