@@ -61,6 +61,7 @@ The Gateway normalizes the following upstream context-window fields to the
 `context_length` extension in its OpenAI-compatible model object:
 
 - `context_length`
+- `max_input_tokens`
 - `max_model_len`
 - `context_window`
 - `context_window_tokens`
@@ -84,6 +85,28 @@ Example response:
   "context_length": 262144
 }
 ```
+
+Providers can override limits for individual backend model IDs. Explicit
+configuration takes precedence over discovered metadata:
+
+```json
+{
+  "models": ["claude-sonnet-5"],
+  "model_metadata": {
+    "claude-sonnet-5": {
+      "context_length": 1000000,
+      "max_output_tokens": 128000
+    }
+  }
+}
+```
+
+Claude `max_input_tokens` and `max_tokens` are normalized to `context_length`
+and `max_output_tokens`. Its RFC 3339 `created_at` value is converted to the
+Unix timestamp used by the OpenAI-compatible model object. Codex `model/list`
+currently has no context-window field; after the first turn, the Gateway learns
+the effective value from `thread/tokenUsage/updated` and includes it in later
+model responses unless configuration overrides it.
 
 ### Chat Completions
 
@@ -368,6 +391,9 @@ $env:CODEX_APP_SERVER_INTEGRATION = "1"
 $env:CODEX_APP_SERVER_CHAT_INTEGRATION = "1"
 $env:CODEX_APP_SERVER_INTEGRATION_MODEL = "gpt-5.6-luna"
 go test ./providers/codex -run TestIntegration -v
+
+$env:ANTHROPIC_MODEL_LIST_INTEGRATION = "1"
+go test ./providers/anthropic -run TestIntegrationListModels -v
 
 $env:GATEWAY_MODEL_LIST_INTEGRATION = "1"
 $env:GATEWAY_OPENAI_COMPAT_CHAT_INTEGRATION = "1"

@@ -9,6 +9,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	llmprovider "github.com/snowmerak/llm-provider"
 )
 
 func TestModelsAndChatRouting(t *testing.T) {
@@ -146,13 +148,17 @@ func TestStaticModelAllowlistIsEnrichedFromUpstream(t *testing.T) {
 			return
 		}
 		_, _ = io.WriteString(writer, `{"object":"list","data":[`+
-			`{"id":"allowed","context_window":131072},{"id":"not-allowed","context_window":262144}]}`)
+			`{"id":"allowed","context_window":131072,"max_tokens":4096},`+
+			`{"id":"not-allowed","context_window":262144}]}`)
 	}))
 	defer upstream.Close()
 
 	gateway, err := New(Config{Providers: []ProviderConfig{{
 		ID: "local", Type: "openai-compatible", Enabled: true,
 		BaseURL: upstream.URL + "/v1", Models: []string{"allowed"},
+		ModelMetadata: map[string]llmprovider.ModelMetadata{
+			"allowed": {ContextLength: 200000, MaxOutputTokens: 8192},
+		},
 	}}})
 	if err != nil {
 		t.Fatal(err)
@@ -163,7 +169,8 @@ func TestStaticModelAllowlistIsEnrichedFromUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(models) != 1 || models[0].ID != "local/allowed" || models[0].ContextLength != 131072 {
+	if len(models) != 1 || models[0].ID != "local/allowed" ||
+		models[0].ContextLength != 200000 || models[0].MaxOutputTokens != 8192 {
 		t.Fatalf("models = %#v", models)
 	}
 }
@@ -211,7 +218,7 @@ func TestLoadConfigExpandsEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = io.WriteString(file, `{"listen":":8080","providers":[{"id":"local","type":"openai-compatible","enabled":true,"base_url":"http://localhost","api_key":"${TEST_GATEWAY_API_KEY}","body":{"prompt_cache_key":"${TEST_CACHE_KEY}","nested":{"value":"${TEST_CACHE_KEY}"}}}]}`)
+	_, _ = io.WriteString(file, `{"listen":":8080","providers":[{"id":"local","type":"openai-compatible","enabled":true,"base_url":"http://localhost","api_key":"${TEST_GATEWAY_API_KEY}","body":{"prompt_cache_key":"${TEST_CACHE_KEY}","nested":{"value":"${TEST_CACHE_KEY}"}},"model_metadata":{"test-model":{"context_length":123456,"max_output_tokens":8192}}}]}`)
 	_ = file.Close()
 	config, err := LoadConfig(file.Name())
 	if err != nil {
@@ -223,6 +230,10 @@ func TestLoadConfigExpandsEnvironment(t *testing.T) {
 	if config.Providers[0].Body["prompt_cache_key"] != "tenant:cache-v1" ||
 		config.Providers[0].Body["nested"].(map[string]any)["value"] != "tenant:cache-v1" {
 		t.Fatalf("expanded body = %#v", config.Providers[0].Body)
+	}
+	metadata := config.Providers[0].ModelMetadata["test-model"]
+	if metadata.ContextLength != 123456 || metadata.MaxOutputTokens != 8192 {
+		t.Fatalf("model metadata = %#v", metadata)
 	}
 }
 

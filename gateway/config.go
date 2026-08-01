@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	llmprovider "github.com/snowmerak/llm-provider"
 )
 
 const defaultOpenRouterBaseURL = "https://openrouter.ai/api/v1"
@@ -17,19 +19,20 @@ type Config struct {
 }
 
 type ProviderConfig struct {
-	ID                     string            `json:"id"`
-	Type                   string            `json:"type"`
-	Prefix                 string            `json:"prefix"`
-	Enabled                bool              `json:"enabled"`
-	BaseURL                string            `json:"base_url,omitempty"`
-	APIKey                 string            `json:"api_key,omitempty"`
-	APIKeyEnv              string            `json:"api_key_env,omitempty"`
-	Headers                map[string]string `json:"headers,omitempty"`
-	Body                   map[string]any    `json:"body,omitempty"`
-	ForwardHeaders         []string          `json:"forward_headers,omitempty"`
-	ForwardResponseHeaders []string          `json:"forward_response_headers,omitempty"`
-	Models                 []string          `json:"models,omitempty"`
-	Codex                  CodexConfig       `json:"codex,omitempty"`
+	ID                     string                               `json:"id"`
+	Type                   string                               `json:"type"`
+	Prefix                 string                               `json:"prefix"`
+	Enabled                bool                                 `json:"enabled"`
+	BaseURL                string                               `json:"base_url,omitempty"`
+	APIKey                 string                               `json:"api_key,omitempty"`
+	APIKeyEnv              string                               `json:"api_key_env,omitempty"`
+	Headers                map[string]string                    `json:"headers,omitempty"`
+	Body                   map[string]any                       `json:"body,omitempty"`
+	ForwardHeaders         []string                             `json:"forward_headers,omitempty"`
+	ForwardResponseHeaders []string                             `json:"forward_response_headers,omitempty"`
+	Models                 []string                             `json:"models,omitempty"`
+	ModelMetadata          map[string]llmprovider.ModelMetadata `json:"model_metadata,omitempty"`
+	Codex                  CodexConfig                          `json:"codex,omitempty"`
 }
 
 type CodexConfig struct {
@@ -124,6 +127,14 @@ func (p ProviderConfig) validate() error {
 	}
 	if p.Type == "openai-compatible" && p.BaseURL == "" {
 		return fmt.Errorf("provider %q requires base_url", p.ID)
+	}
+	for model, metadata := range p.ModelMetadata {
+		if model == "" {
+			return fmt.Errorf("provider %q has metadata for an empty model id", p.ID)
+		}
+		if metadata.ContextLength < 0 || metadata.MaxOutputTokens < 0 {
+			return fmt.Errorf("provider %q model %q metadata values cannot be negative", p.ID, model)
+		}
 	}
 	return nil
 }

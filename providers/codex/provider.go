@@ -55,6 +55,7 @@ type Provider struct {
 	turns     map[string]*turnState
 	active    map[string]*turnState
 	loaded    map[string]bool
+	metadata  map[string]llmprovider.ModelMetadata
 	nextID    atomic.Int64
 	closeOnce sync.Once
 }
@@ -71,6 +72,7 @@ func New(opts ...Option) *Provider {
 		turns:    make(map[string]*turnState),
 		active:   make(map[string]*turnState),
 		loaded:   make(map[string]bool),
+		metadata: make(map[string]llmprovider.ModelMetadata),
 	}
 }
 
@@ -115,6 +117,9 @@ func (p *Provider) ListModels(ctx context.Context) ([]llmprovider.Model, error) 
 				if contextLength == 0 {
 					contextLength = model.MaxModelLength
 				}
+				if runtime := p.modelMetadata(id); runtime.ContextLength > 0 {
+					contextLength = runtime.ContextLength
+				}
 				models = append(models, llmprovider.Model{
 					ID: id, Object: "model", OwnedBy: "codex", ContextLength: contextLength,
 				})
@@ -126,6 +131,23 @@ func (p *Provider) ListModels(ctx context.Context) ([]llmprovider.Model, error) 
 		cursor = *response.NextCursor
 	}
 	return models, nil
+}
+
+func (p *Provider) modelMetadata(model string) llmprovider.ModelMetadata {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.metadata[model]
+}
+
+func (p *Provider) rememberModelContextLength(model string, contextLength int64) {
+	if model == "" || contextLength <= 0 {
+		return
+	}
+	p.mu.Lock()
+	metadata := p.metadata[model]
+	metadata.ContextLength = contextLength
+	p.metadata[model] = metadata
+	p.mu.Unlock()
 }
 
 func (p *Provider) Chat(ctx context.Context, request llmprovider.ChatRequest) (*llmprovider.ChatResponse, error) {
@@ -784,7 +806,8 @@ func (p *Provider) handleNotification(method string, params json.RawMessage) {
 	case "thread/tokenUsage/updated":
 		var event struct {
 			TokenUsage struct {
-				Last struct {
+				ModelContextWindow int64 `json:"modelContextWindow"`
+				Last               struct {
 					InputTokens           int `json:"inputTokens"`
 					CachedInputTokens     int `json:"cachedInputTokens"`
 					CacheWriteInputTokens int `json:"cacheWriteInputTokens"`
@@ -794,6 +817,7 @@ func (p *Provider) handleNotification(method string, params json.RawMessage) {
 			} `json:"tokenUsage"`
 		}
 		if json.Unmarshal(params, &event) == nil {
+			p.rememberModelContextLength(state.model, event.TokenUsage.ModelContextWindow)
 			last := event.TokenUsage.Last
 			state.setUsage(llmprovider.Usage{
 				PromptTokens: last.InputTokens, CompletionTokens: last.OutputTokens, TotalTokens: last.TotalTokens,

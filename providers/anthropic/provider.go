@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	llmprovider "github.com/snowmerak/llm-provider"
 )
@@ -110,25 +111,37 @@ func (p *Provider) ListModels(ctx context.Context) ([]llmprovider.Model, error) 
 		return nil, err
 	}
 	defer response.Body.Close()
+	type anthropicModel struct {
+		ID             string `json:"id"`
+		Type           string `json:"type"`
+		CreatedAt      string `json:"created_at"`
+		MaxInputTokens int64  `json:"max_input_tokens"`
+		MaxTokens      int64  `json:"max_tokens"`
+	}
 	var envelope struct {
-		Data []json.RawMessage `json:"data"`
+		Data []anthropicModel `json:"data"`
 	}
 	if err := json.NewDecoder(response.Body).Decode(&envelope); err != nil {
 		return nil, fmt.Errorf("anthropic: decode model list: %w", err)
 	}
 	models := make([]llmprovider.Model, 0, len(envelope.Data))
-	for _, data := range envelope.Data {
-		var model llmprovider.Model
-		if err := json.Unmarshal(data, &model); err != nil {
-			return nil, fmt.Errorf("anthropic: decode model: %w", err)
+	for _, upstream := range envelope.Data {
+		created := int64(0)
+		if upstream.CreatedAt != "" {
+			createdAt, err := time.Parse(time.RFC3339, upstream.CreatedAt)
+			if err != nil {
+				return nil, fmt.Errorf("anthropic: decode model %q created_at: %w", upstream.ID, err)
+			}
+			created = createdAt.Unix()
 		}
-		if model.Object == "" {
-			model.Object = "model"
+		object := upstream.Type
+		if object == "" {
+			object = "model"
 		}
-		if model.OwnedBy == "" {
-			model.OwnedBy = "anthropic"
-		}
-		models = append(models, model)
+		models = append(models, llmprovider.Model{
+			ID: upstream.ID, Object: object, Created: created, OwnedBy: "anthropic",
+			ContextLength: upstream.MaxInputTokens, MaxOutputTokens: upstream.MaxTokens,
+		})
 	}
 	return models, nil
 }

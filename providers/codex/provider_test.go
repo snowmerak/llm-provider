@@ -27,6 +27,7 @@ func TestListModelsPreservesContextLength(t *testing.T) {
 		config.transportFactoryForTest = func() (transport, error) { return fake, nil }
 	})
 	defer provider.Close()
+	provider.rememberModelContextLength("codex-test", 258400)
 
 	go func() {
 		for data := range fake.writes {
@@ -51,7 +52,7 @@ func TestListModelsPreservesContextLength(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(models) != 1 || models[0].ID != "codex-test" || models[0].ContextLength != 400000 {
+	if len(models) != 1 || models[0].ID != "codex-test" || models[0].ContextLength != 258400 {
 		t.Fatalf("models = %#v", models)
 	}
 }
@@ -137,6 +138,9 @@ func TestChatAdaptsCodexProtocol(t *testing.T) {
 	if response.Usage.TotalTokens != 15 || response.Choices[0].FinishReason != "stop" {
 		t.Fatalf("response = %#v", response)
 	}
+	if metadata := provider.modelMetadata("test-model"); metadata.ContextLength != 258400 {
+		t.Fatalf("model metadata = %#v", metadata)
+	}
 	if err := <-serverErr; err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +190,7 @@ func serveChat(transport *fakeTransport) error {
 				transport.send(map[string]any{"method": "item/started", "params": map[string]any{"threadId": "thread_1", "turnId": "turn_1", "item": map[string]any{"id": "item_1", "type": "agentMessage", "text": "", "phase": "final_answer"}}})
 				transport.send(map[string]any{"method": "item/agentMessage/delta", "params": map[string]any{"threadId": "thread_1", "turnId": "turn_1", "itemId": "item_1", "delta": "Hello "}})
 				transport.send(map[string]any{"method": "item/agentMessage/delta", "params": map[string]any{"threadId": "thread_1", "turnId": "turn_1", "itemId": "item_1", "delta": "from Codex"}})
-				transport.send(map[string]any{"method": "thread/tokenUsage/updated", "params": map[string]any{"threadId": "thread_1", "turnId": "turn_1", "tokenUsage": map[string]any{"last": map[string]any{"inputTokens": 10, "outputTokens": 5, "totalTokens": 15}}}})
+				transport.send(map[string]any{"method": "thread/tokenUsage/updated", "params": map[string]any{"threadId": "thread_1", "turnId": "turn_1", "tokenUsage": map[string]any{"modelContextWindow": 258400, "last": map[string]any{"inputTokens": 10, "outputTokens": 5, "totalTokens": 15}}}})
 				transport.send(map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": "thread_1", "turn": map[string]any{"id": "turn_1", "status": "completed"}}})
 				step++
 			default:

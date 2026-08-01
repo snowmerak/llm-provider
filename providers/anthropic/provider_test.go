@@ -131,7 +131,9 @@ func TestListModelsPreservesContextLength(t *testing.T) {
 		if request.URL.Path != "/models" || request.URL.Query().Get("limit") != "1000" {
 			t.Fatalf("request URL = %s", request.URL)
 		}
-		_, _ = io.WriteString(writer, `{"data":[{"id":"claude-test","context_window_tokens":200000}]}`)
+		_, _ = io.WriteString(writer, `{"data":[{`+
+			`"id":"claude-test","type":"model","created_at":"2026-06-29T00:00:00Z",`+
+			`"max_input_tokens":1000000,"max_tokens":128000}]}`)
 	}))
 	defer server.Close()
 
@@ -139,8 +141,9 @@ func TestListModelsPreservesContextLength(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(models) != 1 || models[0].ID != "claude-test" || models[0].OwnedBy != "anthropic" ||
-		models[0].ContextLength != 200000 {
+	if len(models) != 1 || models[0].ID != "claude-test" || models[0].Object != "model" ||
+		models[0].OwnedBy != "anthropic" || models[0].Created != 1782691200 ||
+		models[0].ContextLength != 1000000 || models[0].MaxOutputTokens != 128000 {
 		t.Fatalf("models = %#v", models)
 	}
 }

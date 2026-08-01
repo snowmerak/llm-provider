@@ -245,11 +245,19 @@ type ChatChunk struct {
 
 // Model is the common OpenAI-compatible model-list representation.
 type Model struct {
-	ID            string `json:"id"`
-	Object        string `json:"object,omitempty"`
-	Created       int64  `json:"created,omitempty"`
-	OwnedBy       string `json:"owned_by,omitempty"`
-	ContextLength int64  `json:"context_length,omitempty"`
+	ID              string `json:"id"`
+	Object          string `json:"object,omitempty"`
+	Created         int64  `json:"created,omitempty"`
+	OwnedBy         string `json:"owned_by,omitempty"`
+	ContextLength   int64  `json:"context_length,omitempty"`
+	MaxOutputTokens int64  `json:"max_output_tokens,omitempty"`
+}
+
+// ModelMetadata contains optional model limits that can be discovered from a
+// provider or overridden by Gateway configuration.
+type ModelMetadata struct {
+	ContextLength   int64 `json:"context_length,omitempty"`
+	MaxOutputTokens int64 `json:"max_output_tokens,omitempty"`
 }
 
 // UnmarshalJSON accepts the context-window field names commonly exposed by
@@ -261,18 +269,26 @@ func (m *Model) UnmarshalJSON(data []byte) error {
 		return err
 	}
 	*m = Model(decoded)
-	if m.ContextLength > 0 {
-		return nil
-	}
-	m.ContextLength = 0
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return err
 	}
-	for _, name := range []string{"max_model_len", "context_window", "context_window_tokens", "max_context_length"} {
-		if value := positiveJSONInt(fields[name]); value > 0 {
-			m.ContextLength = value
-			break
+	if m.ContextLength <= 0 {
+		m.ContextLength = 0
+		for _, name := range []string{"max_input_tokens", "max_model_len", "context_window", "context_window_tokens", "max_context_length"} {
+			if value := positiveJSONInt(fields[name]); value > 0 {
+				m.ContextLength = value
+				break
+			}
+		}
+	}
+	if m.MaxOutputTokens <= 0 {
+		m.MaxOutputTokens = 0
+		for _, name := range []string{"max_tokens", "max_completion_tokens"} {
+			if value := positiveJSONInt(fields[name]); value > 0 {
+				m.MaxOutputTokens = value
+				break
+			}
 		}
 	}
 	return nil

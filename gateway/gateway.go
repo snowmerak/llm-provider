@@ -38,6 +38,7 @@ type route struct {
 	prefix                 string
 	provider               llmprovider.Provider
 	models                 []string
+	modelMetadata          map[string]llmprovider.ModelMetadata
 	forwardHeaders         map[string]struct{}
 	forwardResponseHeaders map[string]struct{}
 }
@@ -74,6 +75,7 @@ func New(config Config) (*Gateway, error) {
 		route := &route{
 			id: providerConfig.ID, prefix: prefix, provider: provider,
 			models:                 append([]string(nil), providerConfig.Models...),
+			modelMetadata:          cloneModelMetadata(providerConfig.ModelMetadata),
 			forwardHeaders:         headerSet(append(defaultRequestHeaders, providerConfig.ForwardHeaders...)),
 			forwardResponseHeaders: headerSet(append(defaultResponseHeaders, providerConfig.ForwardResponseHeaders...)),
 		}
@@ -226,6 +228,7 @@ func (g *Gateway) routeModels(ctx context.Context, route *route) ([]llmprovider.
 		if err != nil {
 			return nil, fmt.Errorf("gateway: list models for %q: %w", route.id, err)
 		}
+		applyModelOverrides(route, listed)
 		return prefixedModels(route, listed), nil
 	}
 
@@ -245,10 +248,38 @@ func (g *Gateway) routeModels(ctx context.Context, route *route) ([]llmprovider.
 		if upstream, ok := metadata[id]; ok {
 			model.Created = upstream.Created
 			model.ContextLength = upstream.ContextLength
+			model.MaxOutputTokens = upstream.MaxOutputTokens
 		}
 		listed = append(listed, model)
 	}
+	applyModelOverrides(route, listed)
 	return prefixedModels(route, listed), nil
+}
+
+func applyModelOverrides(route *route, models []llmprovider.Model) {
+	for index := range models {
+		override, ok := route.modelMetadata[models[index].ID]
+		if !ok {
+			continue
+		}
+		if override.ContextLength > 0 {
+			models[index].ContextLength = override.ContextLength
+		}
+		if override.MaxOutputTokens > 0 {
+			models[index].MaxOutputTokens = override.MaxOutputTokens
+		}
+	}
+}
+
+func cloneModelMetadata(source map[string]llmprovider.ModelMetadata) map[string]llmprovider.ModelMetadata {
+	if len(source) == 0 {
+		return nil
+	}
+	result := make(map[string]llmprovider.ModelMetadata, len(source))
+	for model, metadata := range source {
+		result[model] = metadata
+	}
+	return result
 }
 
 func prefixedModels(route *route, listed []llmprovider.Model) []llmprovider.Model {

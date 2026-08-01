@@ -12,6 +12,7 @@ func TestModelNormalizesContextLengthAliases(t *testing.T) {
 		want int64
 	}{
 		{name: "canonical", body: `{"id":"a","context_length":1000}`, want: 1000},
+		{name: "anthropic", body: `{"id":"a","max_input_tokens":1500}`, want: 1500},
 		{name: "vllm", body: `{"id":"a","max_model_len":2000}`, want: 2000},
 		{name: "context window", body: `{"id":"a","context_window":3000}`, want: 3000},
 		{name: "token suffix", body: `{"id":"a","context_window_tokens":4000}`, want: 4000},
@@ -38,5 +39,26 @@ func TestModelNormalizesContextLengthAliases(t *testing.T) {
 				t.Fatalf("wire model = %s", data)
 			}
 		})
+	}
+}
+
+func TestModelNormalizesMaxOutputTokenAliases(t *testing.T) {
+	var model Model
+	if err := json.Unmarshal([]byte(`{"id":"a","max_tokens":128000}`), &model); err != nil {
+		t.Fatal(err)
+	}
+	if model.MaxOutputTokens != 128000 {
+		t.Fatalf("max output tokens = %d", model.MaxOutputTokens)
+	}
+	data, err := json.Marshal(model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(data, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if wire["max_output_tokens"] != float64(128000) {
+		t.Fatalf("wire model = %s", data)
 	}
 }
