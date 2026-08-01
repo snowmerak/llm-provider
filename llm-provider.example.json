@@ -6,7 +6,21 @@
       "type": "codex-app-server",
       "prefix": "codex",
       "enabled": true,
-      "models": ["gpt-5.6-luna"],
+      "models": ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
+      "model_metadata": {
+        "gpt-5.6-luna": {
+          "context_length": 128000,
+          "max_output_tokens": 128000
+        },
+        "gpt-5.6-terra": {
+          "context_length": 258400,
+          "max_output_tokens": 128000
+        },
+        "gpt-5.6-sol": {
+          "context_length": 258400,
+          "max_output_tokens": 128000
+        }
+      },
       "codex": {
         "command": "codex",
         "args": ["app-server", "--listen", "stdio://"],
