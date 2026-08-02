@@ -115,16 +115,16 @@ Example response:
 
 ```json
 {
-  "id": "grok/grok-4.5",
+  "id": "local/model",
   "object": "model",
-  "owned_by": "xai",
+  "owned_by": "local",
   "capabilities": {
     "reasoning": {
       "supported": true,
       "control": "effort",
-      "supported_efforts": ["low", "medium", "high"],
-      "default_effort": "high",
-      "mandatory": true
+      "supported_efforts": [
+        "none", "minimal", "low", "medium", "high", "xhigh", "max"
+      ]
     }
   }
 }
@@ -143,7 +143,23 @@ Example response:
 `supports_max_tokens: true` advertises an optional token-budget control in
 addition to the primary `control`. An `effort` control without an enumerated
 `supported_efforts` field accepts provider-defined effort values rather than a
-closed list.
+closed list. If discovery and explicit configuration provide no reasoning
+metadata, the Gateway exposes the complete fallback selection set for every
+model without trying to infer its family:
+
+```json
+{
+  "supported": true,
+  "control": "effort",
+  "supported_efforts": [
+    "none", "minimal", "low", "medium", "high", "xhigh", "max"
+  ]
+}
+```
+
+These fallback entries are caller choices, not a guarantee that an upstream
+model implements every value. The upstream response remains authoritative if
+it rejects or ignores a selected fallback value.
 
 Providers can override limits and reasoning capabilities for individual
 backend model IDs. Explicit configuration takes precedence over discovered
@@ -177,9 +193,9 @@ advertises `capabilities.effort`, and OpenRouter advertises
 `reasoning.supported_efforts` and `reasoning.default_effort`; these are
 normalized to `capabilities.reasoning`. OpenRouter toggle and token-budget
 metadata are also retained. Providers whose model catalog does not advertise
-reasoning capabilities can supply them through `model_metadata`. The
-`xai`/`grok` provider profile fills the documented Grok effort levels even
-though xAI's model-list response does not include them.
+reasoning capabilities receive the complete fallback effort selection above.
+`model_metadata` can replace that fallback with explicit capabilities. The
+Gateway does not narrow the fallback by provider, model name, or model family.
 Codex `model/list` currently has no context-window field;
 after the first turn, the Gateway learns the effective value from
 `thread/tokenUsage/updated` and includes it in later model responses unless
@@ -213,7 +229,9 @@ For an `effort` model, send one of its `supported_efforts`:
 
 The Gateway maps this common Chat field to Codex `turn/start.effort`, Anthropic
 `output_config.effort`, OpenAI/xAI `reasoning_effort`, or OpenRouter
-`reasoning.effort` as appropriate.
+`reasoning.effort` as appropriate. When the model received the complete
+fallback list, the selected value is forwarded as-is and may still be rejected
+or ignored by an upstream that does not implement it.
 
 For a `toggle` model such as Hermes through OpenRouter, send the provider's
 reasoning object. For `token_budget`, send `max_tokens` in the same object:
@@ -238,8 +256,9 @@ The nested Chat `reasoning` object is an OpenAI-compatible extension and is
 forwarded to HTTP providers such as OpenRouter. Codex and Anthropic adapters
 advertise only `effort`, so use `reasoning_effort` for those routes. Do not send
 `enabled: false` when the model reports `mandatory: true`. A provider being
-able to forward an unknown field does not establish support: send only the
-control advertised by the selected model's capability metadata.
+able to forward an unknown field does not establish native support. Prefer
+provider-discovered or explicitly configured controls when available; the
+complete effort list is only the selection fallback when neither exists.
 
 Repository agents can follow
 [`use-llm-provider-reasoning`](./.agents/skills/use-llm-provider-reasoning/SKILL.md)

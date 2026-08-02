@@ -12,12 +12,13 @@ or request mappings.
 ## Follow the workflow
 
 1. Resolve the prefixed model through `GET /v1/models/{id}`.
-2. Read `capabilities.reasoning`; do not infer controls from the model name
-   unless the repository has a documented provider capability profile.
+2. Read `capabilities.reasoning`; do not infer controls from the model name.
+   When discovery and configuration provide no reasoning metadata, the
+   Gateway supplies the complete effort fallback instead.
 3. Select the request shape from `control` and honor `mandatory`.
 4. Send only a listed effort when `supported_efforts` is non-empty.
-5. Do not treat mechanical forwarding of an unknown field as provider support;
-   use only the control advertised for the selected model.
+5. Treat the complete fallback effort list as selectable values rather than as
+   proof of native provider support; an upstream may reject or ignore one.
 6. Keep an effort stable across a cache-sensitive conversation unless the user
    explicitly wants to trade cache reuse for a different effort.
 7. Verify the provider wire shape with the narrow provider or Gateway test.
@@ -42,7 +43,7 @@ the primary control.
 |---|---|---|
 | Codex App Server | `turn/start.effort` | `model/list` |
 | Anthropic | `output_config.effort` | Models API `capabilities.effort` |
-| OpenAI/xAI Chat | `reasoning_effort` | Upstream metadata, config, or xAI profile |
+| OpenAI/xAI Chat | `reasoning_effort` | Upstream metadata, config, or fallback |
 | OpenRouter Chat | `reasoning.effort` | Models API `reasoning` object |
 | OpenRouter Hermes | `reasoning.enabled` | Models API reasoning toggle metadata |
 
@@ -72,10 +73,10 @@ Use the common structure in `types.go`:
 }
 ```
 
-When upstream discovery is unavailable, add a narrowly scoped provider profile
-or a `model_metadata` override. Prefer upstream metadata, then built-in
-documented provider metadata, then explicit configuration. Never guess unknown
-model capabilities from a family substring.
+When upstream discovery and explicit configuration are unavailable, the
+Gateway advertises `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and
+`max` for every model. Do not guess a smaller set from a family substring.
+Provider discovery and `model_metadata` take precedence over that fallback.
 
 Inspect these files before editing:
 

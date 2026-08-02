@@ -279,7 +279,9 @@ const (
 
 // ReasoningCapabilities describes how callers may control model reasoning.
 // An effort control with an empty SupportedEfforts list accepts provider-
-// defined effort values rather than a closed enumerated set.
+// defined effort values rather than a closed enumerated set. The Gateway may
+// fill SupportedEfforts with its complete fallback selection set when upstream
+// discovery and explicit configuration provide no reasoning metadata.
 type ReasoningCapabilities struct {
 	Supported         bool             `json:"supported"`
 	Control           ReasoningControl `json:"control,omitempty"`
