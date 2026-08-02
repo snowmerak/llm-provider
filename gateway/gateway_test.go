@@ -418,7 +418,7 @@ func TestLoadConfigDecodesCodexMinimalOverrides(t *testing.T) {
 		t.Fatal(err)
 	}
 	codexConfig := config.Providers[0].Codex
-	if !codexConfig.Minimal {
+	if codexConfig.Minimal == nil || !*codexConfig.Minimal {
 		t.Fatal("minimal was not decoded")
 	}
 	if codexConfig.ThreadStart["cwd"] != `C:\workspace` {
@@ -427,6 +427,38 @@ func TestLoadConfigDecodesCodexMinimalOverrides(t *testing.T) {
 	threadConfig := codexConfig.ThreadStart["config"].(map[string]any)
 	if threadConfig["include_environment_context"] != true {
 		t.Fatalf("thread_start config = %#v", threadConfig)
+	}
+}
+
+func TestCodexConversationCacheConfigValidation(t *testing.T) {
+	base := ProviderConfig{ID: "codex", Type: "codex", Enabled: true}
+	if err := base.validate(); err != nil {
+		t.Fatalf("default in-memory cache config: %v", err)
+	}
+
+	redisConfig := base
+	redisConfig.Codex.ConversationCache = CodexConversationCacheConfig{
+		Type: "redis", TTL: "30m",
+		Redis: CodexRedisConfig{Addresses: []string{"127.0.0.1:6379"}},
+	}
+	if err := redisConfig.validate(); err != nil {
+		t.Fatalf("Redis cache config: %v", err)
+	}
+
+	invalid := base
+	invalid.Codex.ConversationCache.Type = "disk"
+	if err := invalid.validate(); err == nil {
+		t.Fatal("expected unsupported cache type error")
+	}
+	invalid = base
+	invalid.Codex.ConversationCache.Type = "redis"
+	if err := invalid.validate(); err == nil {
+		t.Fatal("expected missing Redis addresses error")
+	}
+	invalid = base
+	invalid.Codex.ConversationCache.TTL = "never"
+	if err := invalid.validate(); err == nil {
+		t.Fatal("expected invalid cache ttl error")
 	}
 }
 

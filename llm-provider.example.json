@@ -28,7 +28,7 @@
         "args": ["app-server", "--listen", "stdio://"],
         "model": "gpt-5.6-luna",
         "working_directory": ".",
-        "minimal": false,
+        "minimal": true,
         "sandbox": "read-only",
         "approval_policy": "never",
         "ephemeral": true,

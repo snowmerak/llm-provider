@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"time"
 )
 
 type SandboxMode string
@@ -47,6 +48,8 @@ type config struct {
 	serviceName             string
 	requestHandler          RequestHandler
 	experimentalAPI         bool
+	conversationCache       ConversationCache
+	conversationCacheTTL    time.Duration
 	transportFactoryForTest func() (transport, error)
 }
 
@@ -89,10 +92,21 @@ func WithBaseInstructions(instructions string) Option {
 	}
 }
 
-// WithMinimal removes optional Codex agent context from new threads. Caller
-// supplied dynamic tools and conversation continuity remain enabled.
+// WithMinimal keeps the default minimal Codex prompt mode enabled. Caller
+// supplied dynamic tools and conversation continuity remain available.
 func WithMinimal() Option {
-	return func(c *config) { c.minimal = true }
+	return WithMinimalEnabled(true)
+}
+
+// WithMinimalEnabled controls minimal Codex prompt mode. Minimal mode is on by
+// default; pass false only when the full Codex agent prompt is required.
+func WithMinimalEnabled(enabled bool) Option {
+	return func(c *config) { c.minimal = enabled }
+}
+
+// WithFullPrompt opts into Codex's full built-in agent prompt.
+func WithFullPrompt() Option {
+	return WithMinimalEnabled(false)
 }
 
 // WithThreadStartParams supplies provider-level defaults for Codex App Server
@@ -134,18 +148,32 @@ func WithExperimentalAPI(enabled bool) Option {
 	return func(c *config) { c.experimentalAPI = enabled }
 }
 
+// WithConversationCache replaces the default in-memory conversation
+// checkpoint cache. The provider closes cache from Close. A non-positive TTL
+// uses the default duration.
+func WithConversationCache(cache ConversationCache, ttl time.Duration) Option {
+	return func(c *config) {
+		c.conversationCache = cache
+		if ttl > 0 {
+			c.conversationCacheTTL = ttl
+		}
+	}
+}
+
 func defaultConfig() config {
 	return config{
-		command:         "codex",
-		args:            []string{"app-server", "--listen", "stdio://"},
-		environment:     os.Environ(),
-		clientName:      "llm_provider",
-		clientTitle:     "llm-provider",
-		clientVersion:   "0.1.0",
-		sandbox:         SandboxReadOnly,
-		approvalPolicy:  ApprovalNever,
-		ephemeral:       true,
-		serviceName:     "llm-provider",
-		experimentalAPI: true,
+		command:              "codex",
+		args:                 []string{"app-server", "--listen", "stdio://"},
+		environment:          os.Environ(),
+		clientName:           "llm_provider",
+		clientTitle:          "llm-provider",
+		clientVersion:        "0.1.0",
+		sandbox:              SandboxReadOnly,
+		approvalPolicy:       ApprovalNever,
+		ephemeral:            true,
+		minimal:              true,
+		serviceName:          "llm-provider",
+		experimentalAPI:      true,
+		conversationCacheTTL: defaultConversationCacheTTL,
 	}
 }

@@ -58,12 +58,17 @@ type Provider struct {
 	metadata  map[string]llmprovider.ModelMetadata
 	nextID    atomic.Int64
 	closeOnce sync.Once
+
+	conversationMu sync.Mutex
 }
 
 func New(opts ...Option) *Provider {
 	cfg := defaultConfig()
 	for _, opt := range opts {
 		opt(&cfg)
+	}
+	if cfg.conversationCache == nil {
+		cfg.conversationCache = NewMemoryConversationCache(defaultConversationCacheMaxEntries)
 	}
 	return &Provider{
 		config:   cfg,
@@ -218,8 +223,20 @@ func (p *Provider) ChatStream(ctx context.Context, request llmprovider.ChatReque
 	if err := p.ensureStarted(ctx); err != nil {
 		return nil, err
 	}
+
+	// Selecting and reserving a thread is serialized so two requests extending
+	// the same inferred checkpoint cannot both start on one Codex thread.
+	p.conversationMu.Lock()
+	defer p.conversationMu.Unlock()
+	resolution := p.inferConversation(ctx, request)
+	if resolution.inferred {
+		request.ConversationID = p.resolveInferredThread(ctx, resolution, toolResultContinuation)
+	}
 	if toolResultContinuation && request.ConversationID != "" {
 		if stream, resumed, err := p.resumeDelegatedTurn(ctx, request); resumed || err != nil {
+			if stream != nil {
+				stream = newConversationStream(p, request, stream)
+			}
 			return stream, err
 		}
 	}
@@ -233,6 +250,12 @@ func (p *Provider) ChatStream(ctx context.Context, request llmprovider.ChatReque
 		threadRequest.ConversationID = ""
 	}
 	threadID, isNew, err := p.prepareThread(ctx, threadRequest)
+	if err != nil && resolution.inferred && threadRequest.ConversationID != "" {
+		// Inferred cache entries can be stale (especially when an ephemeral App
+		// Server was restarted). Fail open by rebuilding a fresh thread.
+		threadRequest.ConversationID = ""
+		threadID, isNew, err = p.prepareThread(ctx, threadRequest)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -303,7 +326,7 @@ func (p *Provider) ChatStream(ctx context.Context, request llmprovider.ChatReque
 	p.mu.Lock()
 	p.turns[response.Turn.ID] = state
 	p.mu.Unlock()
-	return &codexStream{state: state, ctx: ctx}, nil
+	return newConversationStream(p, request, &codexStream{state: state, ctx: ctx}), nil
 }
 
 func (p *Provider) resumeDelegatedTurn(ctx context.Context, request llmprovider.ChatRequest) (llmprovider.Stream, bool, error) {
@@ -1021,6 +1044,11 @@ func (p *Provider) Close() error {
 			closeErr = p.transport.Close()
 		}
 		p.startMu.Unlock()
+		if p.config.conversationCache != nil {
+			if err := p.config.conversationCache.Close(); closeErr == nil {
+				closeErr = err
+			}
+		}
 	})
 	return closeErr
 }

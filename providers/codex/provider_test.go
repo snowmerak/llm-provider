@@ -19,6 +19,17 @@ func TestDefaultCommandStartsCodexAppServer(t *testing.T) {
 	if cfg.command != "codex" || !slices.Equal(cfg.args, []string{"app-server", "--listen", "stdio://"}) {
 		t.Fatalf("unexpected command: %q %#v", cfg.command, cfg.args)
 	}
+	if !cfg.minimal {
+		t.Fatal("minimal prompt mode must be enabled by default")
+	}
+}
+
+func TestFullPromptIsExplicitOptOut(t *testing.T) {
+	cfg := defaultConfig()
+	WithFullPrompt()(&cfg)
+	if cfg.minimal {
+		t.Fatal("full prompt option did not disable minimal mode")
+	}
 }
 
 func TestMinimalThreadStartParamsCanBeOverridden(t *testing.T) {

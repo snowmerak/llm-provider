@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	llmprovider "github.com/snowmerak/llm-provider"
 )
@@ -38,19 +39,36 @@ type ProviderConfig struct {
 }
 
 type CodexConfig struct {
-	Command          string            `json:"command,omitempty"`
-	Args             []string          `json:"args,omitempty"`
-	Environment      map[string]string `json:"environment,omitempty"`
-	Model            string            `json:"model,omitempty"`
-	WorkingDirectory string            `json:"working_directory,omitempty"`
-	BaseInstructions string            `json:"base_instructions,omitempty"`
-	Minimal          bool              `json:"minimal,omitempty"`
-	ThreadStart      map[string]any    `json:"thread_start,omitempty"`
-	Sandbox          string            `json:"sandbox,omitempty"`
-	ApprovalPolicy   string            `json:"approval_policy,omitempty"`
-	Ephemeral        *bool             `json:"ephemeral,omitempty"`
-	ServiceName      string            `json:"service_name,omitempty"`
-	ExperimentalAPI  *bool             `json:"experimental_api,omitempty"`
+	Command           string                       `json:"command,omitempty"`
+	Args              []string                     `json:"args,omitempty"`
+	Environment       map[string]string            `json:"environment,omitempty"`
+	Model             string                       `json:"model,omitempty"`
+	WorkingDirectory  string                       `json:"working_directory,omitempty"`
+	BaseInstructions  string                       `json:"base_instructions,omitempty"`
+	Minimal           *bool                        `json:"minimal,omitempty"`
+	ThreadStart       map[string]any               `json:"thread_start,omitempty"`
+	Sandbox           string                       `json:"sandbox,omitempty"`
+	ApprovalPolicy    string                       `json:"approval_policy,omitempty"`
+	Ephemeral         *bool                        `json:"ephemeral,omitempty"`
+	ServiceName       string                       `json:"service_name,omitempty"`
+	ExperimentalAPI   *bool                        `json:"experimental_api,omitempty"`
+	ConversationCache CodexConversationCacheConfig `json:"conversation_cache,omitempty"`
+}
+
+type CodexConversationCacheConfig struct {
+	Type       string           `json:"type,omitempty"`
+	TTL        string           `json:"ttl,omitempty"`
+	MaxEntries int              `json:"max_entries,omitempty"`
+	Redis      CodexRedisConfig `json:"redis,omitempty"`
+}
+
+type CodexRedisConfig struct {
+	Addresses  []string `json:"addresses,omitempty"`
+	Username   string   `json:"username,omitempty"`
+	Password   string   `json:"password,omitempty"`
+	Database   int      `json:"database,omitempty"`
+	ClientName string   `json:"client_name,omitempty"`
+	KeyPrefix  string   `json:"key_prefix,omitempty"`
 }
 
 func LoadConfig(path string) (Config, error) {
@@ -88,6 +106,16 @@ func (c *Config) expandEnvironment() {
 		}
 		provider.Codex.WorkingDirectory = os.ExpandEnv(provider.Codex.WorkingDirectory)
 		provider.Codex.BaseInstructions = os.ExpandEnv(provider.Codex.BaseInstructions)
+		provider.Codex.ConversationCache.Type = os.ExpandEnv(provider.Codex.ConversationCache.Type)
+		provider.Codex.ConversationCache.TTL = os.ExpandEnv(provider.Codex.ConversationCache.TTL)
+		redis := &provider.Codex.ConversationCache.Redis
+		for index := range redis.Addresses {
+			redis.Addresses[index] = os.ExpandEnv(redis.Addresses[index])
+		}
+		redis.Username = os.ExpandEnv(redis.Username)
+		redis.Password = os.ExpandEnv(redis.Password)
+		redis.ClientName = os.ExpandEnv(redis.ClientName)
+		redis.KeyPrefix = os.ExpandEnv(redis.KeyPrefix)
 		if provider.Codex.ThreadStart != nil {
 			provider.Codex.ThreadStart = expandAny(provider.Codex.ThreadStart).(map[string]any)
 		}
@@ -136,6 +164,27 @@ func (p ProviderConfig) validate() error {
 	}
 	if p.Type == "openai-compatible" && p.BaseURL == "" {
 		return fmt.Errorf("provider %q requires base_url", p.ID)
+	}
+	if p.Type == "codex" || p.Type == "codex-app-server" {
+		cache := p.Codex.ConversationCache
+		if cache.Type != "" && cache.Type != "memory" && cache.Type != "redis" {
+			return fmt.Errorf("provider %q has unsupported Codex conversation cache type %q", p.ID, cache.Type)
+		}
+		if cache.MaxEntries < 0 {
+			return fmt.Errorf("provider %q Codex conversation cache max_entries cannot be negative", p.ID)
+		}
+		if cache.TTL != "" {
+			ttl, err := time.ParseDuration(cache.TTL)
+			if err != nil || ttl <= 0 {
+				return fmt.Errorf("provider %q Codex conversation cache ttl must be a positive duration", p.ID)
+			}
+		}
+		if cache.Type == "redis" && len(cache.Redis.Addresses) == 0 {
+			return fmt.Errorf("provider %q Redis conversation cache requires addresses", p.ID)
+		}
+		if cache.Redis.Database < 0 {
+			return fmt.Errorf("provider %q Redis conversation cache database cannot be negative", p.ID)
+		}
 	}
 	for model, metadata := range p.ModelMetadata {
 		if model == "" {

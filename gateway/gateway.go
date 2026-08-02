@@ -211,8 +211,8 @@ func buildProvider(config ProviderConfig) (llmprovider.Provider, error) {
 		if codexConfig.WorkingDirectory != "" {
 			options = append(options, codex.WithWorkingDirectory(codexConfig.WorkingDirectory))
 		}
-		if codexConfig.Minimal {
-			options = append(options, codex.WithMinimal())
+		if codexConfig.Minimal != nil {
+			options = append(options, codex.WithMinimalEnabled(*codexConfig.Minimal))
 		}
 		if codexConfig.BaseInstructions != "" {
 			options = append(options, codex.WithBaseInstructions(codexConfig.BaseInstructions))
@@ -234,6 +234,32 @@ func buildProvider(config ProviderConfig) (llmprovider.Provider, error) {
 		}
 		if codexConfig.ExperimentalAPI != nil {
 			options = append(options, codex.WithExperimentalAPI(*codexConfig.ExperimentalAPI))
+		}
+		cacheConfig := codexConfig.ConversationCache
+		if cacheConfig.Type != "" || cacheConfig.TTL != "" || cacheConfig.MaxEntries > 0 {
+			var ttl time.Duration
+			if cacheConfig.TTL != "" {
+				ttl, _ = time.ParseDuration(cacheConfig.TTL)
+			}
+			var conversationCache codex.ConversationCache
+			if cacheConfig.Type == "redis" {
+				redisConfig := cacheConfig.Redis
+				if redisConfig.KeyPrefix == "" {
+					redisConfig.KeyPrefix = "llm-provider:codex:" + config.ID + ":conversation:"
+				}
+				redisCache, cacheErr := codex.NewRedisConversationCache(codex.RedisConversationCacheOptions{
+					Addresses: redisConfig.Addresses, Username: redisConfig.Username,
+					Password: redisConfig.Password, Database: redisConfig.Database,
+					ClientName: redisConfig.ClientName, KeyPrefix: redisConfig.KeyPrefix,
+				})
+				if cacheErr != nil {
+					return nil, fmt.Errorf("gateway: provider %q create Redis conversation cache: %w", config.ID, cacheErr)
+				}
+				conversationCache = redisCache
+			} else {
+				conversationCache = codex.NewMemoryConversationCache(cacheConfig.MaxEntries)
+			}
+			options = append(options, codex.WithConversationCache(conversationCache, ttl))
 		}
 		return codex.New(options...), nil
 	case "openrouter", "openai-compatible":

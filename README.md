@@ -156,9 +156,11 @@ curl http://127.0.0.1:8080/v1/chat/completions \
   }'
 ```
 
-Send the `conversation_id` from a Codex response with the next request to
-continue the same App Server thread. Configure `ephemeral: false` if the thread
-must be reopenable after the App Server restarts.
+Send the `conversation_id` from a Codex response with the next request when
+possible. If it is omitted, the Codex provider automatically recovers a thread
+from `session_id`, `X-Session-Id`, or an exact hash of the caller-visible message
+history. Configure `ephemeral: false` if the thread must be reopenable after the
+App Server restarts.
 
 For OpenAI-compatible providers, Chat response JSON fields and SSE chunk fields
 are preserved except that the backend model ID is replaced with its Gateway ID.
@@ -406,13 +408,14 @@ System and developer messages become `developerInstructions` on a new Codex
 thread. Earlier user, assistant, and tool messages are inserted through
 `thread/inject_items`.
 
-Use `WithMinimal` when the caller needs Codex transport and thread continuity
-without the optional Codex agent prompt. It explicitly clears the built-in base
-instructions, disables skill, app, collaboration, permission, and environment
-instructions, disables the main optional agent features, and starts the thread
-without a default execution environment. Caller-supplied dynamic tools remain
-available. Starting without a default execution environment requires the
-experimental API capability, which this provider enables by default.
+Minimal prompt mode is enabled by default. It keeps Codex transport and thread
+continuity while clearing the built-in base instructions, disabling skill, app,
+collaboration, permission, and environment instructions, disabling the main
+optional agent features, and starting the thread without a default execution
+environment. Caller-supplied dynamic tools remain available. Starting without
+a default execution environment requires the experimental API capability,
+which this provider enables by default. Use `WithFullPrompt()` or Gateway
+`"minimal": false` only to opt into the full Codex agent prompt.
 
 The preset also sets `project_doc_max_bytes` to zero, disables personality,
 shell and unified-exec features, and sets `web_search` to `disabled`. These are
@@ -422,7 +425,6 @@ thread-scoped config defaults and can be restored through
 ```go
 provider := codex.New(
     codex.WithModel("gpt-5.6-sol"),
-    codex.WithMinimal(),
     codex.WithThreadStartParams(map[string]any{
         "config": map[string]any{
             "mcp_servers.openaiDeveloperDocs.enabled": false,
@@ -454,9 +456,60 @@ The equivalent Gateway configuration is:
 }
 ```
 
-Keep the returned `conversation_id` for follow-up turns. Minimal mode changes
-the stable prompt prefix but does not replace Codex's provider-managed prompt
-cache or the Gateway's normalized cached-token accounting.
+Keep the returned `conversation_id` for follow-up turns when the client supports
+it. Minimal mode changes the stable prompt prefix but does not replace Codex's
+provider-managed prompt cache or the Gateway's normalized cached-token
+accounting.
+
+#### Codex conversation cache
+
+Codex conversation checkpoints use a bounded in-memory LRU cache by default;
+no configuration is required. The provider records the thread and turn for the
+exact caller-visible transcript. A follow-up request that omits
+`conversation_id` can therefore resume the matching thread. If a request
+branches from an older checkpoint, the provider calls `thread/fork` and returns
+the new thread ID. Codex history compaction remains on the same thread ID.
+
+`session_id` in the JSON body, `X-Session-Id`, and then the OpenAI-compatible
+`user` field are used as the scope for clients that do not resend complete
+message history. Explicit
+`conversation_id` always remains authoritative. Cache failures and stale
+inferred entries fail open by starting a new thread; they do not change the
+behavior of an explicit ID.
+
+For multi-tenant deployments, supply a tenant-scoped `session_id`,
+`X-Session-Id`, or `user` value. History-only recovery cannot distinguish two
+independent callers whose complete visible transcripts are byte-equivalent.
+
+The default cache uses a two-hour TTL and holds at most 4,096 entries. Override
+those values or select Redis with `codex.conversation_cache`:
+
+```json
+{
+  "codex": {
+    "conversation_cache": {
+      "type": "redis",
+      "ttl": "2h",
+      "redis": {
+        "addresses": ["127.0.0.1:6379"],
+        "username": "",
+        "password": "${REDIS_PASSWORD}",
+        "database": 0,
+        "client_name": "llm-provider"
+      }
+    }
+  }
+}
+```
+
+For an explicitly configured memory cache, use `"type": "memory"` and optional
+`"max_entries"` and `"ttl"`. Redis is implemented with `rueidis`. A shared
+Redis cache can outlive one Gateway process, but the referenced Codex threads
+must also be resumable; use `ephemeral: false` and shared Codex thread storage
+for cross-process or restart continuity. With ephemeral threads, a stale Redis
+checkpoint safely falls back to a new thread. If `key_prefix` is omitted, the
+Gateway includes the provider ID in the default prefix so separate Codex routes
+do not share checkpoints accidentally.
 
 Codex dynamic tools operate in one of two modes:
 
