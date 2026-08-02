@@ -149,9 +149,10 @@ func TestListModelsPreservesContextLength(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	reasoning := models[0].Capabilities.Reasoning
 	if len(models) != 1 || models[0].ID != "codex-test" || models[0].ContextLength != 258400 ||
-		models[0].DefaultReasoningEffort != "medium" ||
-		!slices.Equal(models[0].SupportedReasoningEfforts, []string{"low", "medium", "high"}) {
+		reasoning.Control != llmprovider.ReasoningControlEffort || reasoning.DefaultEffort != "medium" ||
+		!slices.Equal(reasoning.SupportedEfforts, []string{"low", "medium", "high"}) {
 		t.Fatalf("models = %#v", models)
 	}
 }

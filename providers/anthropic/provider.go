@@ -150,11 +150,17 @@ func (p *Provider) ListModels(ctx context.Context) ([]llmprovider.Model, error) 
 				break
 			}
 		}
+		var capabilities *llmprovider.ModelCapabilities
+		if len(reasoningEfforts) > 0 {
+			capabilities = &llmprovider.ModelCapabilities{Reasoning: &llmprovider.ReasoningCapabilities{
+				Supported: true, Control: llmprovider.ReasoningControlEffort,
+				SupportedEfforts: reasoningEfforts, DefaultEffort: defaultReasoningEffort,
+			}}
+		}
 		models = append(models, llmprovider.Model{
 			ID: upstream.ID, Object: object, Created: created, OwnedBy: "anthropic",
 			ContextLength: upstream.MaxInputTokens, MaxOutputTokens: upstream.MaxTokens,
-			SupportedReasoningEfforts: reasoningEfforts,
-			DefaultReasoningEffort:    defaultReasoningEffort,
+			Capabilities: capabilities,
 		})
 	}
 	return models, nil

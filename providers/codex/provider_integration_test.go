@@ -38,7 +38,9 @@ func TestIntegrationModelList(t *testing.T) {
 		t.Fatal("model/list returned no models")
 	}
 	for _, model := range models {
-		if len(model.SupportedReasoningEfforts) > 0 && model.DefaultReasoningEffort != "" {
+		if model.Capabilities != nil && model.Capabilities.Reasoning != nil &&
+			len(model.Capabilities.Reasoning.SupportedEfforts) > 0 &&
+			model.Capabilities.Reasoning.DefaultEffort != "" {
 			return
 		}
 	}

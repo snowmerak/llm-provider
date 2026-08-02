@@ -24,6 +24,9 @@ func TestChatMapsSystemToolsResultsAndCacheUsage(t *testing.T) {
 		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
+		if body["output_config"].(map[string]any)["effort"] != "medium" {
+			t.Fatalf("reasoning effort = %#v", body["output_config"])
+		}
 		switch step {
 		case 0:
 			system := body["system"].([]any)
@@ -64,7 +67,8 @@ func TestChatMapsSystemToolsResultsAndCacheUsage(t *testing.T) {
 		Tools: []llmprovider.Tool{{Type: llmprovider.ToolTypeFunction, Function: llmprovider.FunctionDefinition{
 			Name: "lookup", Parameters: map[string]any{"type": "object"},
 		}}},
-		ToolChoice: llmprovider.NamedToolChoice("lookup"),
+		ToolChoice:      llmprovider.NamedToolChoice("lookup"),
+		ReasoningEffort: "medium",
 	}
 	first, err := provider.Chat(context.Background(), request)
 	if err != nil {
@@ -143,11 +147,12 @@ func TestListModelsPreservesContextLength(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	reasoning := models[0].Capabilities.Reasoning
 	if len(models) != 1 || models[0].ID != "claude-test" || models[0].Object != "model" ||
 		models[0].OwnedBy != "anthropic" || models[0].Created != 1782691200 ||
 		models[0].ContextLength != 1000000 || models[0].MaxOutputTokens != 128000 ||
-		models[0].DefaultReasoningEffort != "high" ||
-		!slices.Equal(models[0].SupportedReasoningEfforts, []string{"low", "medium", "high", "max"}) {
+		reasoning.Control != llmprovider.ReasoningControlEffort || reasoning.DefaultEffort != "high" ||
+		!slices.Equal(reasoning.SupportedEfforts, []string{"low", "medium", "high", "max"}) {
 		t.Fatalf("models = %#v", models)
 	}
 }

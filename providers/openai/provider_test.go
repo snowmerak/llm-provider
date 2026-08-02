@@ -91,6 +91,32 @@ func TestChatToolResultMessage(t *testing.T) {
 	}
 }
 
+func TestChatMapsReasoningObject(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		reasoning := body["reasoning"].(map[string]any)
+		if reasoning["enabled"] != true || reasoning["max_tokens"] != float64(4096) {
+			t.Fatalf("reasoning = %#v", reasoning)
+		}
+		_, _ = io.WriteString(w, `{"id":"chat_reasoning","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	provider := New(WithBaseURL(server.URL), WithReasoningEffortObject())
+	_, err := provider.Chat(context.Background(), llmprovider.ChatRequest{
+		Messages: []llmprovider.Message{{Role: llmprovider.RoleUser, Content: "think"}},
+		Extra: map[string]any{"reasoning": map[string]any{
+			"enabled": true, "max_tokens": 4096,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestChatPreservesPromptCacheExtensions(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any

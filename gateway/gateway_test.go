@@ -247,18 +247,18 @@ func TestModelsAndChatRouting(t *testing.T) {
 	defer modelResponse.Body.Close()
 	var models struct {
 		Data []struct {
-			ID                        string   `json:"id"`
-			ContextLength             int64    `json:"context_length"`
-			SupportedReasoningEfforts []string `json:"supported_reasoning_efforts"`
-			DefaultReasoningEffort    string   `json:"default_reasoning_effort"`
+			ID            string                         `json:"id"`
+			ContextLength int64                          `json:"context_length"`
+			Capabilities  *llmprovider.ModelCapabilities `json:"capabilities"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(modelResponse.Body).Decode(&models); err != nil {
 		t.Fatal(err)
 	}
+	modelReasoning := models.Data[0].Capabilities.Reasoning
 	if len(models.Data) != 1 || models.Data[0].ID != "openrouter/vendor/model-a" ||
-		models.Data[0].ContextLength != 262144 || models.Data[0].DefaultReasoningEffort != "medium" ||
-		!slices.Equal(models.Data[0].SupportedReasoningEfforts, []string{"high", "medium", "low"}) {
+		models.Data[0].ContextLength != 262144 || modelReasoning.DefaultEffort != "medium" ||
+		!slices.Equal(modelReasoning.SupportedEfforts, []string{"high", "medium", "low"}) {
 		t.Fatalf("models = %#v", models.Data)
 	}
 	detailResponse, err := http.Get(server.URL + "/v1/models/openrouter/vendor/model-a")
@@ -267,17 +267,17 @@ func TestModelsAndChatRouting(t *testing.T) {
 	}
 	defer detailResponse.Body.Close()
 	var detail struct {
-		ID                        string   `json:"id"`
-		ContextLength             int64    `json:"context_length"`
-		SupportedReasoningEfforts []string `json:"supported_reasoning_efforts"`
-		DefaultReasoningEffort    string   `json:"default_reasoning_effort"`
+		ID            string                         `json:"id"`
+		ContextLength int64                          `json:"context_length"`
+		Capabilities  *llmprovider.ModelCapabilities `json:"capabilities"`
 	}
 	if err := json.NewDecoder(detailResponse.Body).Decode(&detail); err != nil {
 		t.Fatal(err)
 	}
+	detailReasoning := detail.Capabilities.Reasoning
 	if detailResponse.StatusCode != http.StatusOK || detail.ID != "openrouter/vendor/model-a" ||
-		detail.ContextLength != 262144 || detail.DefaultReasoningEffort != "medium" ||
-		!slices.Equal(detail.SupportedReasoningEfforts, []string{"high", "medium", "low"}) {
+		detail.ContextLength != 262144 || detailReasoning.DefaultEffort != "medium" ||
+		!slices.Equal(detailReasoning.SupportedEfforts, []string{"high", "medium", "low"}) {
 		t.Fatalf("model detail status=%d body=%#v", detailResponse.StatusCode, detail)
 	}
 
@@ -326,7 +326,7 @@ func TestStaticModelAllowlistIsEnrichedFromUpstream(t *testing.T) {
 			return
 		}
 		_, _ = io.WriteString(writer, `{"object":"list","data":[`+
-			`{"id":"allowed","context_window":131072,"max_tokens":4096,"supported_reasoning_efforts":["low","medium"],"default_reasoning_effort":"medium"},`+
+			`{"id":"allowed","context_window":131072,"max_tokens":4096,"capabilities":{"reasoning":{"supported":true,"control":"effort","supported_efforts":["low","medium"],"default_effort":"medium"}}},`+
 			`{"id":"not-allowed","context_window":262144}]}`)
 	}))
 	defer upstream.Close()
@@ -337,7 +337,10 @@ func TestStaticModelAllowlistIsEnrichedFromUpstream(t *testing.T) {
 		ModelMetadata: map[string]llmprovider.ModelMetadata{
 			"allowed": {
 				ContextLength: 200000, MaxOutputTokens: 8192,
-				SupportedReasoningEfforts: []string{"low", "high"}, DefaultReasoningEffort: "high",
+				Capabilities: &llmprovider.ModelCapabilities{Reasoning: &llmprovider.ReasoningCapabilities{
+					Supported: true, Control: llmprovider.ReasoningControlEffort,
+					SupportedEfforts: []string{"low", "high"}, DefaultEffort: "high",
+				}},
 			},
 		},
 	}}})
@@ -350,10 +353,11 @@ func TestStaticModelAllowlistIsEnrichedFromUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	reasoning := models[0].Capabilities.Reasoning
 	if len(models) != 1 || models[0].ID != "local/allowed" ||
 		models[0].ContextLength != 200000 || models[0].MaxOutputTokens != 8192 ||
-		models[0].DefaultReasoningEffort != "high" ||
-		!slices.Equal(models[0].SupportedReasoningEfforts, []string{"low", "high"}) {
+		reasoning.DefaultEffort != "high" ||
+		!slices.Equal(reasoning.SupportedEfforts, []string{"low", "high"}) {
 		t.Fatalf("models = %#v", models)
 	}
 }
@@ -386,14 +390,15 @@ func TestXAIModelsIncludeKnownReasoningCapabilities(t *testing.T) {
 	if len(models) != 3 {
 		t.Fatalf("models = %#v", models)
 	}
-	if models[0].ID != "grok/grok-4.5" || models[0].DefaultReasoningEffort != "high" ||
-		!slices.Equal(models[0].SupportedReasoningEfforts, []string{"low", "medium", "high"}) {
+	firstReasoning := models[0].Capabilities.Reasoning
+	if models[0].ID != "grok/grok-4.5" || firstReasoning.DefaultEffort != "high" || !firstReasoning.Mandatory ||
+		!slices.Equal(firstReasoning.SupportedEfforts, []string{"low", "medium", "high"}) {
 		t.Fatalf("grok-4.5 = %#v", models[0])
 	}
-	if !slices.Equal(models[1].SupportedReasoningEfforts, []string{"low", "medium", "high", "xhigh"}) {
+	if !slices.Equal(models[1].Capabilities.Reasoning.SupportedEfforts, []string{"low", "medium", "high", "xhigh"}) {
 		t.Fatalf("grok-4.20-multi-agent = %#v", models[1])
 	}
-	if len(models[2].SupportedReasoningEfforts) != 0 {
+	if models[2].Capabilities != nil {
 		t.Fatalf("unknown Grok model was guessed: %#v", models[2])
 	}
 	if profile := providerModelCapabilityProfile(ProviderConfig{
@@ -446,7 +451,7 @@ func TestLoadConfigExpandsEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = io.WriteString(file, `{"listen":":8080","providers":[{"id":"local","type":"openai-compatible","enabled":true,"base_url":"http://localhost","api_key":"${TEST_GATEWAY_API_KEY}","body":{"prompt_cache_key":"${TEST_CACHE_KEY}","nested":{"value":"${TEST_CACHE_KEY}"}},"model_metadata":{"test-model":{"context_length":123456,"max_output_tokens":8192,"supported_reasoning_efforts":["low","high"],"default_reasoning_effort":"high"}}}]}`)
+	_, _ = io.WriteString(file, `{"listen":":8080","providers":[{"id":"local","type":"openai-compatible","enabled":true,"base_url":"http://localhost","api_key":"${TEST_GATEWAY_API_KEY}","body":{"prompt_cache_key":"${TEST_CACHE_KEY}","nested":{"value":"${TEST_CACHE_KEY}"}},"model_metadata":{"test-model":{"context_length":123456,"max_output_tokens":8192,"capabilities":{"reasoning":{"supported":true,"control":"effort","supported_efforts":["low","high"],"default_effort":"high"}}}}}]}`)
 	_ = file.Close()
 	config, err := LoadConfig(file.Name())
 	if err != nil {
@@ -460,9 +465,10 @@ func TestLoadConfigExpandsEnvironment(t *testing.T) {
 		t.Fatalf("expanded body = %#v", config.Providers[0].Body)
 	}
 	metadata := config.Providers[0].ModelMetadata["test-model"]
+	reasoning := metadata.Capabilities.Reasoning
 	if metadata.ContextLength != 123456 || metadata.MaxOutputTokens != 8192 ||
-		metadata.DefaultReasoningEffort != "high" ||
-		!slices.Equal(metadata.SupportedReasoningEfforts, []string{"low", "high"}) {
+		reasoning.DefaultEffort != "high" ||
+		!slices.Equal(reasoning.SupportedEfforts, []string{"low", "high"}) {
 		t.Fatalf("model metadata = %#v", metadata)
 	}
 }
@@ -521,6 +527,37 @@ func TestCodexConversationCacheConfigValidation(t *testing.T) {
 	invalid.Codex.ConversationCache.TTL = "never"
 	if err := invalid.validate(); err == nil {
 		t.Fatal("expected invalid cache ttl error")
+	}
+}
+
+func TestReasoningCapabilityConfigValidation(t *testing.T) {
+	valid := ProviderConfig{
+		ID: "local", Type: "openai-compatible", Enabled: true, BaseURL: "http://localhost",
+		ModelMetadata: map[string]llmprovider.ModelMetadata{"model": {
+			Capabilities: &llmprovider.ModelCapabilities{Reasoning: &llmprovider.ReasoningCapabilities{
+				Supported: true, Control: llmprovider.ReasoningControlEffort,
+				SupportedEfforts: []string{"low", "high"}, DefaultEffort: "high",
+			}},
+		}},
+	}
+	if err := valid.validate(); err != nil {
+		t.Fatalf("valid reasoning metadata: %v", err)
+	}
+
+	invalid := valid
+	invalid.ModelMetadata = cloneModelMetadata(valid.ModelMetadata)
+	invalid.ModelMetadata["model"].Capabilities.Reasoning.Control = llmprovider.ReasoningControlToggle
+	if err := invalid.validate(); err == nil {
+		t.Fatal("expected toggle-with-efforts validation error")
+	}
+
+	invalid = valid
+	invalid.ModelMetadata = cloneModelMetadata(valid.ModelMetadata)
+	invalid.ModelMetadata["model"].Capabilities.Reasoning.Control = llmprovider.ReasoningControlTokenBudget
+	invalid.ModelMetadata["model"].Capabilities.Reasoning.SupportedEfforts = nil
+	invalid.ModelMetadata["model"].Capabilities.Reasoning.DefaultEffort = ""
+	if err := invalid.validate(); err == nil {
+		t.Fatal("expected token-budget-without-max-tokens validation error")
 	}
 }
 
@@ -711,7 +748,7 @@ func TestResponsesChatAdapterCommonSubset(t *testing.T) {
 
 func TestDecodeChatRequestReasoningEffort(t *testing.T) {
 	request, stream, err := decodeChatRequest(strings.NewReader(
-		`{"model":"codex/model","messages":[{"role":"user","content":"hello"}],"reasoning_effort":"high"}`,
+		`{"model":"codex/model","messages":[{"role":"user","content":"hello"}],"reasoning_effort":"high","reasoning":{"enabled":true}}`,
 	))
 	if err != nil {
 		t.Fatal(err)
@@ -721,6 +758,9 @@ func TestDecodeChatRequestReasoningEffort(t *testing.T) {
 	}
 	if _, duplicate := request.Extra["reasoning_effort"]; duplicate {
 		t.Fatalf("reasoning_effort was also retained as an extension: %#v", request.Extra)
+	}
+	if request.Extra["reasoning"].(map[string]any)["enabled"] != true {
+		t.Fatalf("reasoning extension = %#v", request.Extra["reasoning"])
 	}
 }
 

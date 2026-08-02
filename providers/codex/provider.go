@@ -135,10 +135,16 @@ func (p *Provider) ListModels(ctx context.Context) ([]llmprovider.Model, error) 
 				if runtime := p.modelMetadata(id); runtime.ContextLength > 0 {
 					contextLength = runtime.ContextLength
 				}
+				var capabilities *llmprovider.ModelCapabilities
+				if len(reasoningEfforts) > 0 || model.DefaultReasoningEffort != "" {
+					capabilities = &llmprovider.ModelCapabilities{Reasoning: &llmprovider.ReasoningCapabilities{
+						Supported: true, Control: llmprovider.ReasoningControlEffort,
+						SupportedEfforts: reasoningEfforts, DefaultEffort: model.DefaultReasoningEffort,
+					}}
+				}
 				models = append(models, llmprovider.Model{
 					ID: id, Object: "model", OwnedBy: "codex", ContextLength: contextLength,
-					SupportedReasoningEfforts: reasoningEfforts,
-					DefaultReasoningEffort:    model.DefaultReasoningEffort,
+					Capabilities: capabilities,
 				})
 			}
 		}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Use LLM Provider Reasoning"
+  short_description: "Configure model reasoning controls safely"
+  default_prompt: "Use $use-llm-provider-reasoning to inspect model capabilities and send the correct reasoning controls."

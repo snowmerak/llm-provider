@@ -65,11 +65,12 @@ func TestModelNormalizesMaxOutputTokenAliases(t *testing.T) {
 
 func TestModelPreservesReasoningEffortMetadata(t *testing.T) {
 	var model Model
-	if err := json.Unmarshal([]byte(`{"id":"a","supported_reasoning_efforts":["low","medium","high"],"default_reasoning_effort":"medium"}`), &model); err != nil {
+	if err := json.Unmarshal([]byte(`{"id":"a","capabilities":{"reasoning":{"supported":true,"control":"effort","supported_efforts":["low","medium","high"],"default_effort":"medium"}}}`), &model); err != nil {
 		t.Fatal(err)
 	}
-	if model.DefaultReasoningEffort != "medium" || len(model.SupportedReasoningEfforts) != 3 ||
-		model.SupportedReasoningEfforts[2] != "high" {
+	reasoning := model.Capabilities.Reasoning
+	if reasoning.DefaultEffort != "medium" || len(reasoning.SupportedEfforts) != 3 ||
+		reasoning.SupportedEfforts[2] != "high" {
 		t.Fatalf("model = %#v", model)
 	}
 	data, err := json.Marshal(model)
@@ -86,8 +87,32 @@ func TestModelNormalizesOpenRouterReasoningMetadata(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"id":"a","reasoning":{"supported_efforts":["high","medium","low","minimal"],"default_effort":"medium","mandatory":true}}`), &model); err != nil {
 		t.Fatal(err)
 	}
-	if model.DefaultReasoningEffort != "medium" || len(model.SupportedReasoningEfforts) != 4 ||
-		model.SupportedReasoningEfforts[3] != "minimal" {
+	reasoning := model.Capabilities.Reasoning
+	if reasoning.Control != ReasoningControlEffort || reasoning.DefaultEffort != "medium" ||
+		len(reasoning.SupportedEfforts) != 4 || reasoning.SupportedEfforts[3] != "minimal" {
+		t.Fatalf("model = %#v", model)
+	}
+}
+
+func TestModelNormalizesOpenRouterReasoningToggle(t *testing.T) {
+	var model Model
+	if err := json.Unmarshal([]byte(`{"id":"hermes","reasoning":{"default_enabled":false,"mandatory":false}}`), &model); err != nil {
+		t.Fatal(err)
+	}
+	reasoning := model.Capabilities.Reasoning
+	if reasoning.Control != ReasoningControlToggle || reasoning.DefaultEnabled == nil || *reasoning.DefaultEnabled {
+		t.Fatalf("model = %#v", model)
+	}
+}
+
+func TestModelNormalizesOpenRouterReasoningTokenBudget(t *testing.T) {
+	var model Model
+	if err := json.Unmarshal([]byte(`{"id":"budget","reasoning":{"supports_max_tokens":true,"default_enabled":true}}`), &model); err != nil {
+		t.Fatal(err)
+	}
+	reasoning := model.Capabilities.Reasoning
+	if reasoning.Control != ReasoningControlTokenBudget || !reasoning.SupportsMaxTokens ||
+		reasoning.DefaultEnabled == nil || !*reasoning.DefaultEnabled {
 		t.Fatalf("model = %#v", model)
 	}
 }

@@ -358,8 +358,7 @@ func (g *Gateway) discoverRouteModels(ctx context.Context, route *route) ([]llmp
 			model.Created = upstream.Created
 			model.ContextLength = upstream.ContextLength
 			model.MaxOutputTokens = upstream.MaxOutputTokens
-			model.SupportedReasoningEfforts = append([]string(nil), upstream.SupportedReasoningEfforts...)
-			model.DefaultReasoningEffort = upstream.DefaultReasoningEffort
+			model.Capabilities = cloneModelCapabilities(upstream.Capabilities)
 		}
 		listed = append(listed, model)
 	}
@@ -387,27 +386,31 @@ func applyKnownModelCapabilities(route *route, models []llmprovider.Model) {
 		return
 	}
 	for index := range models {
-		efforts, defaultEffort, known := knownXAIReasoningCapabilities(models[index].ID)
+		reasoning, known := knownXAIReasoningCapabilities(models[index].ID)
 		if !known {
 			continue
 		}
-		if len(models[index].SupportedReasoningEfforts) == 0 {
-			models[index].SupportedReasoningEfforts = efforts
-		}
-		if models[index].DefaultReasoningEffort == "" {
-			models[index].DefaultReasoningEffort = defaultEffort
+		if models[index].Capabilities == nil || models[index].Capabilities.Reasoning == nil {
+			models[index].Capabilities = &llmprovider.ModelCapabilities{Reasoning: reasoning}
 		}
 	}
 }
 
-func knownXAIReasoningCapabilities(model string) ([]string, string, bool) {
+func knownXAIReasoningCapabilities(model string) (*llmprovider.ReasoningCapabilities, bool) {
 	switch model {
 	case "grok-4.5", "grok-4.5-latest", "grok-build-latest":
-		return []string{"low", "medium", "high"}, "high", true
+		return &llmprovider.ReasoningCapabilities{
+			Supported: true, Control: llmprovider.ReasoningControlEffort,
+			SupportedEfforts: []string{"low", "medium", "high"}, DefaultEffort: "high",
+			Mandatory: true,
+		}, true
 	case "grok-4.20-multi-agent":
-		return []string{"low", "medium", "high", "xhigh"}, "", true
+		return &llmprovider.ReasoningCapabilities{
+			Supported: true, Control: llmprovider.ReasoningControlEffort,
+			SupportedEfforts: []string{"low", "medium", "high", "xhigh"},
+		}, true
 	default:
-		return nil, "", false
+		return nil, false
 	}
 }
 
@@ -446,13 +449,21 @@ func (g *Gateway) refreshModelCacheLoop(ctx context.Context) {
 func (r *route) storeModels(models []llmprovider.Model) {
 	r.modelMu.Lock()
 	defer r.modelMu.Unlock()
-	r.cachedModels = append(r.cachedModels[:0], models...)
+	r.cachedModels = cloneModels(models)
 }
 
 func (r *route) modelsFromCache() []llmprovider.Model {
 	r.modelMu.RLock()
 	defer r.modelMu.RUnlock()
-	return append([]llmprovider.Model(nil), r.cachedModels...)
+	return cloneModels(r.cachedModels)
+}
+
+func cloneModels(source []llmprovider.Model) []llmprovider.Model {
+	result := append([]llmprovider.Model(nil), source...)
+	for index := range result {
+		result[index].Capabilities = cloneModelCapabilities(result[index].Capabilities)
+	}
+	return result
 }
 
 func applyModelOverrides(route *route, models []llmprovider.Model) {
@@ -467,11 +478,8 @@ func applyModelOverrides(route *route, models []llmprovider.Model) {
 		if override.MaxOutputTokens > 0 {
 			models[index].MaxOutputTokens = override.MaxOutputTokens
 		}
-		if len(override.SupportedReasoningEfforts) > 0 {
-			models[index].SupportedReasoningEfforts = append([]string(nil), override.SupportedReasoningEfforts...)
-		}
-		if override.DefaultReasoningEffort != "" {
-			models[index].DefaultReasoningEffort = override.DefaultReasoningEffort
+		if override.Capabilities != nil {
+			models[index].Capabilities = cloneModelCapabilities(override.Capabilities)
 		}
 	}
 }
@@ -482,8 +490,25 @@ func cloneModelMetadata(source map[string]llmprovider.ModelMetadata) map[string]
 	}
 	result := make(map[string]llmprovider.ModelMetadata, len(source))
 	for model, metadata := range source {
-		metadata.SupportedReasoningEfforts = append([]string(nil), metadata.SupportedReasoningEfforts...)
+		metadata.Capabilities = cloneModelCapabilities(metadata.Capabilities)
 		result[model] = metadata
+	}
+	return result
+}
+
+func cloneModelCapabilities(source *llmprovider.ModelCapabilities) *llmprovider.ModelCapabilities {
+	if source == nil {
+		return nil
+	}
+	result := &llmprovider.ModelCapabilities{}
+	if source.Reasoning != nil {
+		reasoning := *source.Reasoning
+		reasoning.SupportedEfforts = append([]string(nil), source.Reasoning.SupportedEfforts...)
+		if source.Reasoning.DefaultEnabled != nil {
+			value := *source.Reasoning.DefaultEnabled
+			reasoning.DefaultEnabled = &value
+		}
+		result.Reasoning = &reasoning
 	}
 	return result
 }

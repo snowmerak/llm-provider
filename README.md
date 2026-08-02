@@ -78,6 +78,9 @@ configurable timeout:
 }
 ```
 
+`capabilities` is a Gateway extension to the OpenAI-compatible model object.
+It is returned by both `GET /v1/models` and `GET /v1/models/{id}`.
+
 If discovery fails for a provider without a static model list, that provider's
 models are omitted from the cache while models from healthy providers remain
 available. A later successful refresh adds the provider back automatically.
@@ -112,15 +115,35 @@ Example response:
 
 ```json
 {
-  "id": "local/Agents-A1-4bit",
+  "id": "grok/grok-4.5",
   "object": "model",
-  "created": 1785572356,
-  "owned_by": "omlx",
-  "context_length": 262144,
-  "supported_reasoning_efforts": ["low", "medium", "high"],
-  "default_reasoning_effort": "medium"
+  "owned_by": "xai",
+  "capabilities": {
+    "reasoning": {
+      "supported": true,
+      "control": "effort",
+      "supported_efforts": ["low", "medium", "high"],
+      "default_effort": "high",
+      "mandatory": true
+    }
+  }
 }
 ```
+
+`capabilities.reasoning.control` tells clients which request control to show:
+
+| Control | Meaning | Request field |
+|---|---|---|
+| `effort` | Select one advertised reasoning level | Chat: `reasoning_effort`; Responses: `reasoning.effort` |
+| `toggle` | Enable or disable reasoning | `reasoning.enabled` |
+| `token_budget` | Set a reasoning-token budget | `reasoning.max_tokens` |
+| `fixed` | The model reasons without a caller-adjustable control | Send no reasoning control |
+
+`mandatory: true` means callers must not disable reasoning.
+`supports_max_tokens: true` advertises an optional token-budget control in
+addition to the primary `control`. An `effort` control without an enumerated
+`supported_efforts` field accepts provider-defined effort values rather than a
+closed list.
 
 Providers can override limits and reasoning capabilities for individual
 backend model IDs. Explicit configuration takes precedence over discovered
@@ -133,8 +156,14 @@ metadata:
     "claude-sonnet-5": {
       "context_length": 1000000,
       "max_output_tokens": 128000,
-      "supported_reasoning_efforts": ["low", "medium", "high"],
-      "default_reasoning_effort": "medium"
+      "capabilities": {
+        "reasoning": {
+          "supported": true,
+          "control": "effort",
+          "supported_efforts": ["low", "medium", "high"],
+          "default_effort": "medium"
+        }
+      }
     }
   }
 }
@@ -146,10 +175,11 @@ Unix timestamp used by the OpenAI-compatible model object. Codex `model/list`
 advertises `supportedReasoningEfforts` and `defaultReasoningEffort`, Anthropic
 advertises `capabilities.effort`, and OpenRouter advertises
 `reasoning.supported_efforts` and `reasoning.default_effort`; these are
-normalized to the snake-case model fields shown above. Providers whose model
-catalog does not advertise reasoning capabilities can supply them through
-`model_metadata`. The `xai`/`grok` provider profile fills the documented Grok
-effort levels even though xAI's model-list response does not include them.
+normalized to `capabilities.reasoning`. OpenRouter toggle and token-budget
+metadata are also retained. Providers whose model catalog does not advertise
+reasoning capabilities can supply them through `model_metadata`. The
+`xai`/`grok` provider profile fills the documented Grok effort levels even
+though xAI's model-list response does not include them.
 Codex `model/list` currently has no context-window field;
 after the first turn, the Gateway learns the effective value from
 `thread/tokenUsage/updated` and includes it in later model responses unless
@@ -162,12 +192,59 @@ curl http://127.0.0.1:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "codex/gpt-5.6-luna",
+    "reasoning_effort": "high",
     "messages": [
       {"role": "system", "content": "Always answer concisely."},
       {"role": "user", "content": "Describe this repository in one sentence."}
     ]
   }'
 ```
+
+Read the selected model's `capabilities.reasoning` before building a request.
+For an `effort` model, send one of its `supported_efforts`:
+
+```json
+{
+  "model": "grok/grok-4.5",
+  "reasoning_effort": "medium",
+  "messages": [{"role": "user", "content": "Analyze this design."}]
+}
+```
+
+The Gateway maps this common Chat field to Codex `turn/start.effort`, Anthropic
+`output_config.effort`, OpenAI/xAI `reasoning_effort`, or OpenRouter
+`reasoning.effort` as appropriate.
+
+For a `toggle` model such as Hermes through OpenRouter, send the provider's
+reasoning object. For `token_budget`, send `max_tokens` in the same object:
+
+```json
+{
+  "model": "openrouter/nousresearch/hermes-4-70b",
+  "reasoning": {"enabled": true},
+  "messages": [{"role": "user", "content": "Solve this carefully."}]
+}
+```
+
+```json
+{
+  "model": "openrouter/provider/model",
+  "reasoning": {"max_tokens": 4096},
+  "messages": [{"role": "user", "content": "Solve this carefully."}]
+}
+```
+
+The nested Chat `reasoning` object is an OpenAI-compatible extension and is
+forwarded to HTTP providers such as OpenRouter. Codex and Anthropic adapters
+advertise only `effort`, so use `reasoning_effort` for those routes. Do not send
+`enabled: false` when the model reports `mandatory: true`. A provider being
+able to forward an unknown field does not establish support: send only the
+control advertised by the selected model's capability metadata.
+
+Repository agents can follow
+[`use-llm-provider-reasoning`](./.agents/skills/use-llm-provider-reasoning/SKILL.md)
+when adding model capabilities, selecting request controls, or changing
+provider reasoning mappings.
 
 Send the `conversation_id` from a Codex response with the next request when
 possible. If it is omitted, the Codex provider automatically recovers a thread
@@ -199,7 +276,9 @@ adapted for the common text/message/function-tool subset. The lifecycle APIs
 for stored or background Responses are intentionally not implemented yet.
 The adapter maps `reasoning.effort` to the selected provider's native effort
 setting. Chat Completions accepts the equivalent top-level
-`reasoning_effort` field.
+`reasoning_effort` field. Native OpenAI-compatible Responses routes preserve
+the complete `reasoning` object, including `enabled` and `max_tokens`; adapted
+Codex and Anthropic routes currently consume only `reasoning.effort`.
 
 ### Embeddings
 
@@ -399,6 +478,7 @@ defer client.Close()
 
 response, err := client.Chat(ctx, llmprovider.ChatRequest{
     Model: "gpt-5.6-luna",
+    ReasoningEffort: "high",
     Messages: []llmprovider.Message{
         {Role: llmprovider.RoleSystem, Content: "Always answer concisely."},
         {Role: llmprovider.RoleUser, Content: "Hello!"},
@@ -408,6 +488,27 @@ response, err := client.Chat(ctx, llmprovider.ChatRequest{
     },
 })
 ```
+
+`ReasoningEffort` is the typed Go control for effort-based models. For an
+OpenAI-compatible provider that advertises a toggle or token budget, use
+`Extra` so the provider-native `reasoning` object is preserved:
+
+```go
+response, err := client.Chat(ctx, llmprovider.ChatRequest{
+    Model: "nousresearch/hermes-4-70b",
+    Messages: []llmprovider.Message{{
+        Role: llmprovider.RoleUser, Content: "Solve this carefully.",
+    }},
+    Extra: map[string]any{
+        "reasoning": map[string]any{"enabled": true},
+    },
+})
+```
+
+When constructing an OpenRouter provider directly, add
+`openai.WithReasoningEffortObject()` so typed `ReasoningEffort` is encoded as
+`reasoning.effort`. The Gateway enables this option automatically for providers
+with `type: "openrouter"`.
 
 ### Codex App Server
 

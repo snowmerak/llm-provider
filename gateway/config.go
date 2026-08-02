@@ -197,8 +197,31 @@ func (p ProviderConfig) validate() error {
 		if metadata.ContextLength < 0 || metadata.MaxOutputTokens < 0 {
 			return fmt.Errorf("provider %q model %q metadata values cannot be negative", p.ID, model)
 		}
-		seenEfforts := make(map[string]struct{}, len(metadata.SupportedReasoningEfforts))
-		for _, effort := range metadata.SupportedReasoningEfforts {
+		if metadata.Capabilities == nil || metadata.Capabilities.Reasoning == nil {
+			continue
+		}
+		reasoning := metadata.Capabilities.Reasoning
+		if !reasoning.Supported {
+			return fmt.Errorf("provider %q model %q has reasoning capabilities with supported=false", p.ID, model)
+		}
+		switch reasoning.Control {
+		case llmprovider.ReasoningControlEffort, llmprovider.ReasoningControlToggle,
+			llmprovider.ReasoningControlTokenBudget, llmprovider.ReasoningControlFixed:
+		default:
+			return fmt.Errorf("provider %q model %q has unsupported reasoning control %q", p.ID, model, reasoning.Control)
+		}
+		if reasoning.Control != llmprovider.ReasoningControlEffort &&
+			len(reasoning.SupportedEfforts) > 0 {
+			return fmt.Errorf("provider %q model %q has reasoning efforts for %q control", p.ID, model, reasoning.Control)
+		}
+		if reasoning.Control != llmprovider.ReasoningControlEffort && reasoning.DefaultEffort != "" {
+			return fmt.Errorf("provider %q model %q has a default reasoning effort for %q control", p.ID, model, reasoning.Control)
+		}
+		if reasoning.Control == llmprovider.ReasoningControlTokenBudget && !reasoning.SupportsMaxTokens {
+			return fmt.Errorf("provider %q model %q token-budget control must support max tokens", p.ID, model)
+		}
+		seenEfforts := make(map[string]struct{}, len(reasoning.SupportedEfforts))
+		for _, effort := range reasoning.SupportedEfforts {
 			if effort == "" {
 				return fmt.Errorf("provider %q model %q has an empty reasoning effort", p.ID, model)
 			}
@@ -207,9 +230,9 @@ func (p ProviderConfig) validate() error {
 			}
 			seenEfforts[effort] = struct{}{}
 		}
-		if metadata.DefaultReasoningEffort != "" && len(seenEfforts) > 0 {
-			if _, supported := seenEfforts[metadata.DefaultReasoningEffort]; !supported {
-				return fmt.Errorf("provider %q model %q default reasoning effort %q is not supported", p.ID, model, metadata.DefaultReasoningEffort)
+		if reasoning.DefaultEffort != "" && len(seenEfforts) > 0 {
+			if _, supported := seenEfforts[reasoning.DefaultEffort]; !supported {
+				return fmt.Errorf("provider %q model %q default reasoning effort %q is not supported", p.ID, model, reasoning.DefaultEffort)
 			}
 		}
 	}

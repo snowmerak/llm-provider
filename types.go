@@ -246,23 +246,48 @@ type ChatChunk struct {
 
 // Model is the common OpenAI-compatible model-list representation.
 type Model struct {
-	ID                        string   `json:"id"`
-	Object                    string   `json:"object,omitempty"`
-	Created                   int64    `json:"created,omitempty"`
-	OwnedBy                   string   `json:"owned_by,omitempty"`
-	ContextLength             int64    `json:"context_length,omitempty"`
-	MaxOutputTokens           int64    `json:"max_output_tokens,omitempty"`
-	SupportedReasoningEfforts []string `json:"supported_reasoning_efforts,omitempty"`
-	DefaultReasoningEffort    string   `json:"default_reasoning_effort,omitempty"`
+	ID              string             `json:"id"`
+	Object          string             `json:"object,omitempty"`
+	Created         int64              `json:"created,omitempty"`
+	OwnedBy         string             `json:"owned_by,omitempty"`
+	ContextLength   int64              `json:"context_length,omitempty"`
+	MaxOutputTokens int64              `json:"max_output_tokens,omitempty"`
+	Capabilities    *ModelCapabilities `json:"capabilities,omitempty"`
 }
 
 // ModelMetadata contains optional model capabilities that can be discovered
 // from a provider or overridden by Gateway configuration.
 type ModelMetadata struct {
-	ContextLength             int64    `json:"context_length,omitempty"`
-	MaxOutputTokens           int64    `json:"max_output_tokens,omitempty"`
-	SupportedReasoningEfforts []string `json:"supported_reasoning_efforts,omitempty"`
-	DefaultReasoningEffort    string   `json:"default_reasoning_effort,omitempty"`
+	ContextLength   int64              `json:"context_length,omitempty"`
+	MaxOutputTokens int64              `json:"max_output_tokens,omitempty"`
+	Capabilities    *ModelCapabilities `json:"capabilities,omitempty"`
+}
+
+// ModelCapabilities describes optional controls advertised for a model.
+type ModelCapabilities struct {
+	Reasoning *ReasoningCapabilities `json:"reasoning,omitempty"`
+}
+
+type ReasoningControl string
+
+const (
+	ReasoningControlEffort      ReasoningControl = "effort"
+	ReasoningControlToggle      ReasoningControl = "toggle"
+	ReasoningControlTokenBudget ReasoningControl = "token_budget"
+	ReasoningControlFixed       ReasoningControl = "fixed"
+)
+
+// ReasoningCapabilities describes how callers may control model reasoning.
+// An effort control with an empty SupportedEfforts list accepts provider-
+// defined effort values rather than a closed enumerated set.
+type ReasoningCapabilities struct {
+	Supported         bool             `json:"supported"`
+	Control           ReasoningControl `json:"control,omitempty"`
+	SupportedEfforts  []string         `json:"supported_efforts,omitempty"`
+	DefaultEffort     string           `json:"default_effort,omitempty"`
+	DefaultEnabled    *bool            `json:"default_enabled,omitempty"`
+	Mandatory         bool             `json:"mandatory,omitempty"`
+	SupportsMaxTokens bool             `json:"supports_max_tokens,omitempty"`
 }
 
 // UnmarshalJSON accepts common model metadata extensions exposed by
@@ -296,17 +321,36 @@ func (m *Model) UnmarshalJSON(data []byte) error {
 			}
 		}
 	}
-	if reasoningData := fields["reasoning"]; len(reasoningData) > 0 {
+	if reasoningData := fields["reasoning"]; len(reasoningData) > 0 &&
+		(m.Capabilities == nil || m.Capabilities.Reasoning == nil) {
 		var reasoning struct {
-			SupportedEfforts []string `json:"supported_efforts"`
-			DefaultEffort    string   `json:"default_effort"`
+			SupportedEfforts  []string `json:"supported_efforts"`
+			DefaultEffort     string   `json:"default_effort"`
+			DefaultEnabled    *bool    `json:"default_enabled"`
+			Mandatory         bool     `json:"mandatory"`
+			SupportsMaxTokens bool     `json:"supports_max_tokens"`
 		}
 		if json.Unmarshal(reasoningData, &reasoning) == nil {
-			if len(m.SupportedReasoningEfforts) == 0 {
-				m.SupportedReasoningEfforts = append([]string(nil), reasoning.SupportedEfforts...)
+			var reasoningFields map[string]json.RawMessage
+			_ = json.Unmarshal(reasoningData, &reasoningFields)
+			control := ReasoningControl("")
+			if _, advertised := reasoningFields["supported_efforts"]; advertised || reasoning.DefaultEffort != "" {
+				control = ReasoningControlEffort
+			} else if reasoning.SupportsMaxTokens {
+				control = ReasoningControlTokenBudget
+			} else if reasoning.DefaultEnabled != nil {
+				control = ReasoningControlToggle
 			}
-			if m.DefaultReasoningEffort == "" {
-				m.DefaultReasoningEffort = reasoning.DefaultEffort
+			if control != "" || reasoning.Mandatory {
+				if control == "" {
+					control = ReasoningControlFixed
+				}
+				m.Capabilities = &ModelCapabilities{Reasoning: &ReasoningCapabilities{
+					Supported: true, Control: control,
+					SupportedEfforts: append([]string(nil), reasoning.SupportedEfforts...),
+					DefaultEffort:    reasoning.DefaultEffort, DefaultEnabled: reasoning.DefaultEnabled,
+					Mandatory: reasoning.Mandatory, SupportsMaxTokens: reasoning.SupportsMaxTokens,
+				}}
 			}
 		}
 	}
