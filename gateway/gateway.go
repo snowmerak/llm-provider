@@ -211,8 +211,14 @@ func buildProvider(config ProviderConfig) (llmprovider.Provider, error) {
 		if codexConfig.WorkingDirectory != "" {
 			options = append(options, codex.WithWorkingDirectory(codexConfig.WorkingDirectory))
 		}
+		if codexConfig.Minimal {
+			options = append(options, codex.WithMinimal())
+		}
 		if codexConfig.BaseInstructions != "" {
 			options = append(options, codex.WithBaseInstructions(codexConfig.BaseInstructions))
+		}
+		if len(codexConfig.ThreadStart) > 0 {
+			options = append(options, codex.WithThreadStartParams(codexConfig.ThreadStart))
 		}
 		if codexConfig.Sandbox != "" {
 			options = append(options, codex.WithSandbox(codex.SandboxMode(codexConfig.Sandbox)))

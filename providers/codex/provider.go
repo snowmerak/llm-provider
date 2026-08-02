@@ -360,29 +360,7 @@ func (p *Provider) prepareThread(ctx context.Context, request llmprovider.ChatRe
 		return request.ConversationID, false, nil
 	}
 
-	params := map[string]any{
-		"approvalPolicy": string(p.config.approvalPolicy),
-		"sandbox":        string(p.config.sandbox),
-		"ephemeral":      p.config.ephemeral,
-	}
-	if p.config.baseInstructions != "" {
-		params["baseInstructions"] = p.config.baseInstructions
-	}
-	if model := firstNonEmpty(request.Model, p.config.model); model != "" {
-		params["model"] = model
-	}
-	if cwd := firstNonEmpty(request.WorkingDirectory, p.config.cwd); cwd != "" {
-		params["cwd"] = cwd
-	}
-	if instructions := developerInstructions(request.Messages); instructions != "" {
-		params["developerInstructions"] = instructions
-	}
-	if p.config.serviceName != "" {
-		params["serviceName"] = p.config.serviceName
-	}
-	if includeTools {
-		params["dynamicTools"] = dynamicTools
-	}
+	params := p.newThreadStartParams(request, dynamicTools, includeTools)
 	var response threadResponse
 	if err := p.Call(ctx, "thread/start", params, &response); err != nil {
 		return "", false, err
@@ -394,6 +372,119 @@ func (p *Provider) prepareThread(ctx context.Context, request llmprovider.ChatRe
 	p.loaded[response.Thread.ID] = true
 	p.mu.Unlock()
 	return response.Thread.ID, true, nil
+}
+
+func (p *Provider) newThreadStartParams(
+	request llmprovider.ChatRequest,
+	dynamicTools []map[string]any,
+	includeTools bool,
+) map[string]any {
+	params := map[string]any{
+		"approvalPolicy": string(p.config.approvalPolicy),
+		"sandbox":        string(p.config.sandbox),
+		"ephemeral":      p.config.ephemeral,
+	}
+	if p.config.minimal {
+		params["baseInstructions"] = ""
+		params["config"] = minimalThreadConfig()
+		if p.config.experimentalAPI {
+			params["environments"] = []any{}
+		}
+	}
+	if p.config.baseInstructionsSet {
+		params["baseInstructions"] = p.config.baseInstructions
+	}
+	if p.config.serviceName != "" {
+		params["serviceName"] = p.config.serviceName
+	}
+	mergeThreadStartParams(params, p.config.threadStartParams)
+	if model := firstNonEmpty(request.Model, p.config.model); model != "" {
+		params["model"] = model
+	}
+	if cwd := firstNonEmpty(request.WorkingDirectory, p.config.cwd); cwd != "" {
+		params["cwd"] = cwd
+	}
+	if instructions := developerInstructions(request.Messages); instructions != "" {
+		params["developerInstructions"] = instructions
+	}
+	if includeTools {
+		params["dynamicTools"] = dynamicTools
+	}
+	return params
+}
+
+func minimalThreadConfig() map[string]any {
+	return map[string]any{
+		"include_permissions_instructions":        false,
+		"include_apps_instructions":               false,
+		"include_collaboration_mode_instructions": false,
+		"include_environment_context":             false,
+		"project_doc_max_bytes":                   0,
+		"skills.include_instructions":             false,
+		"features.plugins":                        false,
+		"features.apps":                           false,
+		"features.personality":                    false,
+		"features.multi_agent":                    false,
+		"features.multi_agent_v2":                 false,
+		"features.tool_suggest":                   false,
+		"features.goals":                          false,
+		"features.browser_use":                    false,
+		"features.browser_use_external":           false,
+		"features.browser_use_full_cdp_access":    false,
+		"features.computer_use":                   false,
+		"features.image_generation":               false,
+		"features.in_app_browser":                 false,
+		"features.skill_search":                   false,
+		"features.shell_tool":                     false,
+		"features.unified_exec":                   false,
+		"web_search":                              "disabled",
+	}
+}
+
+func mergeThreadStartParams(params, overrides map[string]any) {
+	for key, value := range overrides {
+		if key == "config" {
+			baseConfig, baseOK := params[key].(map[string]any)
+			overrideConfig, overrideOK := value.(map[string]any)
+			if baseOK && overrideOK {
+				merged := cloneMap(baseConfig)
+				for configKey, configValue := range overrideConfig {
+					merged[configKey] = cloneValue(configValue)
+				}
+				params[key] = merged
+				continue
+			}
+		}
+		params[key] = cloneValue(value)
+	}
+}
+
+func cloneMap(values map[string]any) map[string]any {
+	if values == nil {
+		return nil
+	}
+	cloned := make(map[string]any, len(values))
+	for key, value := range values {
+		cloned[key] = cloneValue(value)
+	}
+	return cloned
+}
+
+func cloneValue(value any) any {
+	switch value := value.(type) {
+	case map[string]any:
+		return cloneMap(value)
+	case []any:
+		cloned := make([]any, len(value))
+		for index, item := range value {
+			cloned[index] = cloneValue(item)
+		}
+		return cloned
+	case []string:
+		return append([]string(nil), value...)
+	default:
+		return value
+	}
 }
 
 func (p *Provider) dynamicTools(request llmprovider.ChatRequest) ([]map[string]any, bool, error) {

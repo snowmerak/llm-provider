@@ -405,6 +405,31 @@ func TestLoadConfigExpandsEnvironment(t *testing.T) {
 	}
 }
 
+func TestLoadConfigDecodesCodexMinimalOverrides(t *testing.T) {
+	t.Setenv("TEST_CODEX_CWD", `C:\workspace`)
+	file, err := os.CreateTemp(t.TempDir(), "config-*.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.WriteString(file, `{"providers":[{"id":"codex-minimal","type":"codex-app-server","enabled":true,"codex":{"minimal":true,"thread_start":{"cwd":"${TEST_CODEX_CWD}","config":{"include_environment_context":true}}}}]}`)
+	_ = file.Close()
+	config, err := LoadConfig(file.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	codexConfig := config.Providers[0].Codex
+	if !codexConfig.Minimal {
+		t.Fatal("minimal was not decoded")
+	}
+	if codexConfig.ThreadStart["cwd"] != `C:\workspace` {
+		t.Fatalf("thread_start cwd = %#v", codexConfig.ThreadStart["cwd"])
+	}
+	threadConfig := codexConfig.ThreadStart["config"].(map[string]any)
+	if threadConfig["include_environment_context"] != true {
+		t.Fatalf("thread_start config = %#v", threadConfig)
+	}
+}
+
 func TestRejectsUnknownPrefix(t *testing.T) {
 	gateway, err := New(Config{Providers: []ProviderConfig{{
 		ID: "local", Type: "openai-compatible", Enabled: true, BaseURL: "http://localhost",

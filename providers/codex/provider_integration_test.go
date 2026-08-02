@@ -94,6 +94,120 @@ func TestIntegrationChat(t *testing.T) {
 	}
 }
 
+// TestIntegrationPromptBaseline measures the prompt overhead supplied by Codex
+// itself separately from the caller's chat messages. It is opt-in because it
+// performs several real model calls.
+func TestIntegrationPromptBaseline(t *testing.T) {
+	if os.Getenv("CODEX_APP_SERVER_PROMPT_BASELINE_INTEGRATION") == "" {
+		t.Skip("set CODEX_APP_SERVER_PROMPT_BASELINE_INTEGRATION=1 to measure Codex prompt overhead")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	defer cancel()
+
+	options := []Option{WithEphemeral(true), WithSandbox(SandboxReadOnly)}
+	if model := os.Getenv("CODEX_APP_SERVER_INTEGRATION_MODEL"); model != "" {
+		options = append(options, WithModel(model))
+	}
+	provider := New(options...)
+	defer provider.Close()
+
+	measure := func(name string, request llmprovider.ChatRequest) *llmprovider.ChatResponse {
+		t.Helper()
+		response, err := provider.Chat(ctx, request)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		logPromptUsage(t, name, response.Usage)
+		return response
+	}
+
+	first := measure("default_base", llmprovider.ChatRequest{Messages: []llmprovider.Message{{
+		Role: llmprovider.RoleUser, Content: "Reply with exactly PONG. Do not use tools.",
+	}}})
+	measure("same_thread_second_turn", llmprovider.ChatRequest{
+		ConversationID: first.ConversationID,
+		Messages: []llmprovider.Message{{
+			Role: llmprovider.RoleUser, Content: "Reply with exactly PONG again. Do not use tools.",
+		}},
+	})
+	measure("later_new_thread_default_base", llmprovider.ChatRequest{Messages: []llmprovider.Message{{
+		Role: llmprovider.RoleUser, Content: "Reply with exactly PONG. Do not use tools.",
+	}}})
+
+	systemProvider := New(options...)
+	defer systemProvider.Close()
+	systemResponse, err := systemProvider.Chat(ctx, llmprovider.ChatRequest{Messages: []llmprovider.Message{
+		{Role: llmprovider.RoleSystem, Content: "Answer concisely."},
+		{Role: llmprovider.RoleUser, Content: "Reply with exactly PONG. Do not use tools."},
+	}})
+	if err != nil {
+		t.Fatalf("fresh_default_base_with_system_message: %v", err)
+	}
+	logPromptUsage(t, "fresh_default_base_with_system_message", systemResponse.Usage)
+
+	replacementOptions := append([]Option(nil), options...)
+	replacementOptions = append(replacementOptions, WithBaseInstructions(
+		"You are a concise assistant. Reply exactly as requested.",
+	))
+	replacementProvider := New(replacementOptions...)
+	defer replacementProvider.Close()
+	replacementResponse, err := replacementProvider.Chat(ctx, llmprovider.ChatRequest{Messages: []llmprovider.Message{{
+		Role: llmprovider.RoleUser, Content: "Reply with exactly PONG. Do not use tools.",
+	}}})
+	if err != nil {
+		t.Fatalf("replacement_base: %v", err)
+	}
+	logPromptUsage(t, "replacement_base", replacementResponse.Usage)
+
+	minimalOptions := []Option{
+		WithEphemeral(true),
+		WithSandbox(SandboxReadOnly),
+		WithMinimal(),
+		WithThreadStartParams(map[string]any{"config": map[string]any{
+			"mcp_servers.openaiDeveloperDocs.enabled": false,
+		}}),
+	}
+	if model := os.Getenv("CODEX_APP_SERVER_INTEGRATION_MODEL"); model != "" {
+		minimalOptions = append(minimalOptions, WithModel(model))
+	}
+	minimalProvider := New(minimalOptions...)
+	defer minimalProvider.Close()
+	minimalResponse, err := minimalProvider.Chat(ctx, llmprovider.ChatRequest{Messages: []llmprovider.Message{{
+		Role: llmprovider.RoleUser, Content: "Reply with exactly PONG. Do not use tools.",
+	}}})
+	if err != nil {
+		t.Fatalf("minimal_thread_start: %v", err)
+	}
+	logPromptUsage(t, "minimal_thread_start", minimalResponse.Usage)
+	minimalContinuation, err := minimalProvider.Chat(ctx, llmprovider.ChatRequest{
+		ConversationID: minimalResponse.ConversationID,
+		Messages: []llmprovider.Message{{
+			Role: llmprovider.RoleUser, Content: "Reply with exactly PONG again. Do not use tools.",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("minimal_same_thread_second_turn: %v", err)
+	}
+	if minimalContinuation.ConversationID != minimalResponse.ConversationID {
+		t.Fatalf("minimal continuation changed thread: first=%q second=%q",
+			minimalResponse.ConversationID, minimalContinuation.ConversationID)
+	}
+	logPromptUsage(t, "minimal_same_thread_second_turn", minimalContinuation.Usage)
+}
+
+func logPromptUsage(t *testing.T, name string, usage llmprovider.Usage) {
+	t.Helper()
+	if usage.PromptTokens <= 0 {
+		t.Fatalf("%s reported no prompt tokens: %#v", name, usage)
+	}
+	if usage.PromptDetails == nil {
+		t.Fatalf("%s reported no prompt token details: %#v", name, usage)
+	}
+	t.Logf("%s prompt=%d cached=%d cache_write=%d output=%d total=%d",
+		name, usage.PromptTokens, usage.PromptDetails.CachedTokens,
+		usage.PromptDetails.CacheWriteTokens, usage.CompletionTokens, usage.TotalTokens)
+}
+
 func TestIntegrationSystemPromptAndContext(t *testing.T) {
 	if os.Getenv("CODEX_APP_SERVER_CONTEXT_INTEGRATION") == "" {
 		t.Skip("set CODEX_APP_SERVER_CONTEXT_INTEGRATION=1 to test prompt and thread context")

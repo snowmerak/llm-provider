@@ -37,6 +37,9 @@ type config struct {
 	clientVersion           string
 	model                   string
 	baseInstructions        string
+	baseInstructionsSet     bool
+	minimal                 bool
+	threadStartParams       map[string]any
 	cwd                     string
 	sandbox                 SandboxMode
 	approvalPolicy          ApprovalPolicy
@@ -80,7 +83,23 @@ func WithModel(model string) Option {
 // threads. System and developer chat messages remain additive through
 // developerInstructions.
 func WithBaseInstructions(instructions string) Option {
-	return func(c *config) { c.baseInstructions = instructions }
+	return func(c *config) {
+		c.baseInstructions = instructions
+		c.baseInstructionsSet = true
+	}
+}
+
+// WithMinimal removes optional Codex agent context from new threads. Caller
+// supplied dynamic tools and conversation continuity remain enabled.
+func WithMinimal() Option {
+	return func(c *config) { c.minimal = true }
+}
+
+// WithThreadStartParams supplies provider-level defaults for Codex App Server
+// thread/start. Request model, cwd, developer instructions, and dynamic tools
+// take precedence over values with the same names.
+func WithThreadStartParams(params map[string]any) Option {
+	return func(c *config) { c.threadStartParams = cloneMap(params) }
 }
 
 func WithWorkingDirectory(cwd string) Option {

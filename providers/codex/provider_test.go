@@ -21,6 +21,84 @@ func TestDefaultCommandStartsCodexAppServer(t *testing.T) {
 	}
 }
 
+func TestMinimalThreadStartParamsCanBeOverridden(t *testing.T) {
+	overrides := map[string]any{
+		"sandbox":               "danger-full-access",
+		"model":                 "configured-model",
+		"developerInstructions": "configured developer instructions",
+		"config": map[string]any{
+			"include_environment_context":             true,
+			"mcp_servers.example.enabled":             false,
+			"include_collaboration_mode_instructions": true,
+		},
+	}
+	provider := New(
+		WithMinimal(),
+		WithBaseInstructions("Compact base instructions."),
+		WithThreadStartParams(overrides),
+	)
+	overrides["sandbox"] = "workspace-write"
+	overrides["config"].(map[string]any)["include_environment_context"] = false
+
+	dynamicTools := []map[string]any{{"name": "lookup"}}
+	request := llmprovider.ChatRequest{
+		Model:            "request-model",
+		WorkingDirectory: `C:\repo`,
+		Messages: []llmprovider.Message{
+			{Role: llmprovider.RoleSystem, Content: "Request developer instructions."},
+			{Role: llmprovider.RoleUser, Content: "Hello"},
+		},
+	}
+	params := provider.newThreadStartParams(request, dynamicTools, true)
+
+	if params["baseInstructions"] != "Compact base instructions." {
+		t.Fatalf("baseInstructions = %#v", params["baseInstructions"])
+	}
+	if params["sandbox"] != "danger-full-access" {
+		t.Fatalf("sandbox = %#v", params["sandbox"])
+	}
+	if params["model"] != "request-model" || params["cwd"] != `C:\repo` {
+		t.Fatalf("request overrides = %#v", params)
+	}
+	if params["developerInstructions"] != "Request developer instructions." {
+		t.Fatalf("developerInstructions = %#v", params["developerInstructions"])
+	}
+	if !slices.Equal(params["environments"].([]any), []any{}) {
+		t.Fatalf("environments = %#v", params["environments"])
+	}
+	config := params["config"].(map[string]any)
+	if config["include_environment_context"] != true ||
+		config["include_collaboration_mode_instructions"] != true ||
+		config["skills.include_instructions"] != false ||
+		config["features.plugins"] != false ||
+		config["features.personality"] != false ||
+		config["project_doc_max_bytes"] != 0 ||
+		config["features.shell_tool"] != false ||
+		config["features.unified_exec"] != false ||
+		config["web_search"] != "disabled" ||
+		config["mcp_servers.example.enabled"] != false {
+		t.Fatalf("config = %#v", config)
+	}
+	if got := params["dynamicTools"].([]map[string]any); len(got) != 1 || got[0]["name"] != "lookup" {
+		t.Fatalf("dynamicTools = %#v", params["dynamicTools"])
+	}
+
+	config["features.plugins"] = true
+	second := provider.newThreadStartParams(request, dynamicTools, true)
+	if second["config"].(map[string]any)["features.plugins"] != false {
+		t.Fatal("thread/start config was mutated through returned params")
+	}
+}
+
+func TestEmptyBaseInstructionsAreForwarded(t *testing.T) {
+	provider := New(WithBaseInstructions(""))
+	params := provider.newThreadStartParams(llmprovider.ChatRequest{}, nil, false)
+	value, exists := params["baseInstructions"]
+	if !exists || value != "" {
+		t.Fatalf("baseInstructions = %#v, exists = %v", value, exists)
+	}
+}
+
 func TestListModelsPreservesContextLength(t *testing.T) {
 	fake := newFakeTransport()
 	provider := New(func(config *config) {

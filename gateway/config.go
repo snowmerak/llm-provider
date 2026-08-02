@@ -44,6 +44,8 @@ type CodexConfig struct {
 	Model            string            `json:"model,omitempty"`
 	WorkingDirectory string            `json:"working_directory,omitempty"`
 	BaseInstructions string            `json:"base_instructions,omitempty"`
+	Minimal          bool              `json:"minimal,omitempty"`
+	ThreadStart      map[string]any    `json:"thread_start,omitempty"`
 	Sandbox          string            `json:"sandbox,omitempty"`
 	ApprovalPolicy   string            `json:"approval_policy,omitempty"`
 	Ephemeral        *bool             `json:"ephemeral,omitempty"`
@@ -86,6 +88,9 @@ func (c *Config) expandEnvironment() {
 		}
 		provider.Codex.WorkingDirectory = os.ExpandEnv(provider.Codex.WorkingDirectory)
 		provider.Codex.BaseInstructions = os.ExpandEnv(provider.Codex.BaseInstructions)
+		if provider.Codex.ThreadStart != nil {
+			provider.Codex.ThreadStart = expandAny(provider.Codex.ThreadStart).(map[string]any)
+		}
 	}
 }
 

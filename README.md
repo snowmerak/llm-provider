@@ -406,6 +406,58 @@ System and developer messages become `developerInstructions` on a new Codex
 thread. Earlier user, assistant, and tool messages are inserted through
 `thread/inject_items`.
 
+Use `WithMinimal` when the caller needs Codex transport and thread continuity
+without the optional Codex agent prompt. It explicitly clears the built-in base
+instructions, disables skill, app, collaboration, permission, and environment
+instructions, disables the main optional agent features, and starts the thread
+without a default execution environment. Caller-supplied dynamic tools remain
+available. Starting without a default execution environment requires the
+experimental API capability, which this provider enables by default.
+
+The preset also sets `project_doc_max_bytes` to zero, disables personality,
+shell and unified-exec features, and sets `web_search` to `disabled`. These are
+thread-scoped config defaults and can be restored through
+`WithThreadStartParams` or `thread_start.config`.
+
+```go
+provider := codex.New(
+    codex.WithModel("gpt-5.6-sol"),
+    codex.WithMinimal(),
+    codex.WithThreadStartParams(map[string]any{
+        "config": map[string]any{
+            "mcp_servers.openaiDeveloperDocs.enabled": false,
+        },
+    }),
+)
+```
+
+`WithThreadStartParams` is the escape hatch for additional App Server
+`thread/start` fields. Its nested `config` object is merged with the minimal
+defaults, so an explicit value can restore one part of the prompt. Request
+model, working directory, system/developer messages, and dynamic tools take
+precedence over provider defaults. Top-level names inside `thread_start` use
+the App Server's native camelCase spelling.
+
+The equivalent Gateway configuration is:
+
+```json
+{
+  "codex": {
+    "model": "gpt-5.6-sol",
+    "minimal": true,
+    "thread_start": {
+      "config": {
+        "mcp_servers.openaiDeveloperDocs.enabled": false
+      }
+    }
+  }
+}
+```
+
+Keep the returned `conversation_id` for follow-up turns. Minimal mode changes
+the stable prompt prefix but does not replace Codex's provider-managed prompt
+cache or the Gateway's normalized cached-token accounting.
+
 Codex dynamic tools operate in one of two modes:
 
 - With a `ToolHandler`, the provider handles App Server `item/tool/call` events
@@ -537,6 +589,9 @@ $env:CODEX_APP_SERVER_INTEGRATION = "1"
 $env:CODEX_APP_SERVER_CHAT_INTEGRATION = "1"
 $env:CODEX_APP_SERVER_INTEGRATION_MODEL = "gpt-5.6-luna"
 go test ./providers/codex -run TestIntegration -v
+
+$env:CODEX_APP_SERVER_PROMPT_BASELINE_INTEGRATION = "1"
+go test ./providers/codex -run TestIntegrationPromptBaseline -v -count=1
 
 $env:ANTHROPIC_MODEL_LIST_INTEGRATION = "1"
 go test ./providers/anthropic -run TestIntegrationListModels -v
