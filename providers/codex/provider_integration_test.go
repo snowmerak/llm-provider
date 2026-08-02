@@ -30,15 +30,19 @@ func TestIntegrationModelList(t *testing.T) {
 	defer provider.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	var response struct {
-		Data []any `json:"data"`
-	}
-	if err := provider.Call(ctx, "model/list", map[string]any{}, &response); err != nil {
+	models, err := provider.ListModels(ctx)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if len(response.Data) == 0 {
+	if len(models) == 0 {
 		t.Fatal("model/list returned no models")
 	}
+	for _, model := range models {
+		if len(model.SupportedReasoningEfforts) > 0 && model.DefaultReasoningEffort != "" {
+			return
+		}
+	}
+	t.Fatalf("model/list returned no reasoning effort metadata: %#v", models)
 }
 
 func TestIntegrationDynamicTool(t *testing.T) {

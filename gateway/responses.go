@@ -19,16 +19,21 @@ import (
 var responseIDSequence atomic.Uint64
 
 type responseRequest struct {
-	Model             string           `json:"model"`
-	Input             any              `json:"input"`
-	Instructions      string           `json:"instructions,omitempty"`
-	Tools             []map[string]any `json:"tools,omitempty"`
-	ToolChoice        any              `json:"tool_choice,omitempty"`
-	ParallelToolCalls *bool            `json:"parallel_tool_calls,omitempty"`
-	Temperature       *float64         `json:"temperature,omitempty"`
-	TopP              *float64         `json:"top_p,omitempty"`
-	MaxOutputTokens   *int             `json:"max_output_tokens,omitempty"`
-	Stream            bool             `json:"stream,omitempty"`
+	Model             string             `json:"model"`
+	Input             any                `json:"input"`
+	Instructions      string             `json:"instructions,omitempty"`
+	Tools             []map[string]any   `json:"tools,omitempty"`
+	ToolChoice        any                `json:"tool_choice,omitempty"`
+	ParallelToolCalls *bool              `json:"parallel_tool_calls,omitempty"`
+	Temperature       *float64           `json:"temperature,omitempty"`
+	TopP              *float64           `json:"top_p,omitempty"`
+	MaxOutputTokens   *int               `json:"max_output_tokens,omitempty"`
+	Reasoning         *responseReasoning `json:"reasoning,omitempty"`
+	Stream            bool               `json:"stream,omitempty"`
+}
+
+type responseReasoning struct {
+	Effort string `json:"effort,omitempty"`
 }
 
 func (g *Gateway) handleResponses(writer http.ResponseWriter, request *http.Request) {
@@ -131,10 +136,14 @@ func responseToChat(request responseRequest) (llmprovider.ChatRequest, error) {
 			toolChoice = llmprovider.NamedToolChoice(name)
 		}
 	}
+	reasoningEffort := ""
+	if request.Reasoning != nil {
+		reasoningEffort = request.Reasoning.Effort
+	}
 	return llmprovider.ChatRequest{
 		Messages: messages, Temperature: request.Temperature, TopP: request.TopP,
 		MaxCompletionTokens: request.MaxOutputTokens, Tools: tools, ToolChoice: toolChoice,
-		ParallelToolCalls: request.ParallelToolCalls,
+		ParallelToolCalls: request.ParallelToolCalls, ReasoningEffort: reasoningEffort,
 	}, nil
 }
 

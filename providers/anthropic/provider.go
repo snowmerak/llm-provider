@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -117,6 +118,9 @@ func (p *Provider) ListModels(ctx context.Context) ([]llmprovider.Model, error) 
 		CreatedAt      string `json:"created_at"`
 		MaxInputTokens int64  `json:"max_input_tokens"`
 		MaxTokens      int64  `json:"max_tokens"`
+		Capabilities   struct {
+			Effort json.RawMessage `json:"effort"`
+		} `json:"capabilities"`
 	}
 	var envelope struct {
 		Data []anthropicModel `json:"data"`
@@ -138,12 +142,57 @@ func (p *Provider) ListModels(ctx context.Context) ([]llmprovider.Model, error) 
 		if object == "" {
 			object = "model"
 		}
+		reasoningEfforts := supportedAnthropicReasoningEfforts(upstream.Capabilities.Effort)
+		defaultReasoningEffort := ""
+		for _, effort := range reasoningEfforts {
+			if effort == "high" {
+				defaultReasoningEffort = "high"
+				break
+			}
+		}
 		models = append(models, llmprovider.Model{
 			ID: upstream.ID, Object: object, Created: created, OwnedBy: "anthropic",
 			ContextLength: upstream.MaxInputTokens, MaxOutputTokens: upstream.MaxTokens,
+			SupportedReasoningEfforts: reasoningEfforts,
+			DefaultReasoningEffort:    defaultReasoningEffort,
 		})
 	}
 	return models, nil
+}
+
+func supportedAnthropicReasoningEfforts(data json.RawMessage) []string {
+	if len(data) == 0 || string(data) == "null" {
+		return nil
+	}
+	var capabilities map[string]json.RawMessage
+	if json.Unmarshal(data, &capabilities) != nil {
+		return nil
+	}
+	efforts := make([]string, 0, len(capabilities))
+	for name, raw := range capabilities {
+		if name == "supported" {
+			continue
+		}
+		var capability struct {
+			Supported bool `json:"supported"`
+		}
+		if json.Unmarshal(raw, &capability) == nil && capability.Supported {
+			efforts = append(efforts, name)
+		}
+	}
+	order := map[string]int{"none": 0, "minimal": 1, "low": 2, "medium": 3, "high": 4, "xhigh": 5, "max": 6}
+	sort.Slice(efforts, func(i, j int) bool {
+		left, leftKnown := order[efforts[i]]
+		right, rightKnown := order[efforts[j]]
+		if leftKnown && rightKnown {
+			return left < right
+		}
+		if leftKnown != rightKnown {
+			return leftKnown
+		}
+		return efforts[i] < efforts[j]
+	})
+	return efforts
 }
 
 func (p *Provider) Close() error { return nil }

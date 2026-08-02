@@ -84,13 +84,17 @@ func New(opts ...Option) *Provider {
 // ListModels discovers the picker-visible models from Codex App Server.
 func (p *Provider) ListModels(ctx context.Context) ([]llmprovider.Model, error) {
 	type appServerModel struct {
-		ID                  string `json:"id"`
-		Model               string `json:"model"`
-		ContextLength       int64  `json:"contextLength"`
-		ContextWindow       int64  `json:"contextWindow"`
-		ContextWindowTokens int64  `json:"contextWindowTokens"`
-		MaxContextLength    int64  `json:"maxContextLength"`
-		MaxModelLength      int64  `json:"maxModelLen"`
+		ID                        string `json:"id"`
+		Model                     string `json:"model"`
+		ContextLength             int64  `json:"contextLength"`
+		ContextWindow             int64  `json:"contextWindow"`
+		ContextWindowTokens       int64  `json:"contextWindowTokens"`
+		MaxContextLength          int64  `json:"maxContextLength"`
+		MaxModelLength            int64  `json:"maxModelLen"`
+		DefaultReasoningEffort    string `json:"defaultReasoningEffort"`
+		SupportedReasoningEfforts []struct {
+			ReasoningEffort string `json:"reasoningEffort"`
+		} `json:"supportedReasoningEfforts"`
 	}
 	models := make([]llmprovider.Model, 0)
 	var cursor string
@@ -109,6 +113,12 @@ func (p *Provider) ListModels(ctx context.Context) ([]llmprovider.Model, error) 
 		for _, model := range response.Data {
 			id := firstNonEmpty(model.Model, model.ID)
 			if id != "" {
+				reasoningEfforts := make([]string, 0, len(model.SupportedReasoningEfforts))
+				for _, option := range model.SupportedReasoningEfforts {
+					if option.ReasoningEffort != "" {
+						reasoningEfforts = append(reasoningEfforts, option.ReasoningEffort)
+					}
+				}
 				contextLength := model.ContextLength
 				if contextLength == 0 {
 					contextLength = model.ContextWindow
@@ -127,6 +137,8 @@ func (p *Provider) ListModels(ctx context.Context) ([]llmprovider.Model, error) 
 				}
 				models = append(models, llmprovider.Model{
 					ID: id, Object: "model", OwnedBy: "codex", ContextLength: contextLength,
+					SupportedReasoningEfforts: reasoningEfforts,
+					DefaultReasoningEffort:    model.DefaultReasoningEffort,
 				})
 			}
 		}

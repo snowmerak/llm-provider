@@ -180,10 +180,11 @@ type ChatRequest struct {
 	// OpenAI-compatible provider forwards it as an extension field so gateways
 	// can route stateful backends. The Codex provider treats it as a thread ID.
 	ConversationID string `json:"conversation_id,omitempty"`
-	// WorkingDirectory, ReasoningEffort, and OutputSchema are optional Codex
-	// turn overrides. Other providers may ignore them.
+	// WorkingDirectory and OutputSchema are optional provider-specific turn
+	// overrides. ReasoningEffort is forwarded using each provider's native
+	// request shape when supported.
 	WorkingDirectory string      `json:"-"`
-	ReasoningEffort  string      `json:"-"`
+	ReasoningEffort  string      `json:"reasoning_effort,omitempty"`
 	OutputSchema     any         `json:"-"`
 	ToolHandler      ToolHandler `json:"-"`
 }
@@ -245,23 +246,27 @@ type ChatChunk struct {
 
 // Model is the common OpenAI-compatible model-list representation.
 type Model struct {
-	ID              string `json:"id"`
-	Object          string `json:"object,omitempty"`
-	Created         int64  `json:"created,omitempty"`
-	OwnedBy         string `json:"owned_by,omitempty"`
-	ContextLength   int64  `json:"context_length,omitempty"`
-	MaxOutputTokens int64  `json:"max_output_tokens,omitempty"`
+	ID                        string   `json:"id"`
+	Object                    string   `json:"object,omitempty"`
+	Created                   int64    `json:"created,omitempty"`
+	OwnedBy                   string   `json:"owned_by,omitempty"`
+	ContextLength             int64    `json:"context_length,omitempty"`
+	MaxOutputTokens           int64    `json:"max_output_tokens,omitempty"`
+	SupportedReasoningEfforts []string `json:"supported_reasoning_efforts,omitempty"`
+	DefaultReasoningEffort    string   `json:"default_reasoning_effort,omitempty"`
 }
 
-// ModelMetadata contains optional model limits that can be discovered from a
-// provider or overridden by Gateway configuration.
+// ModelMetadata contains optional model capabilities that can be discovered
+// from a provider or overridden by Gateway configuration.
 type ModelMetadata struct {
-	ContextLength   int64 `json:"context_length,omitempty"`
-	MaxOutputTokens int64 `json:"max_output_tokens,omitempty"`
+	ContextLength             int64    `json:"context_length,omitempty"`
+	MaxOutputTokens           int64    `json:"max_output_tokens,omitempty"`
+	SupportedReasoningEfforts []string `json:"supported_reasoning_efforts,omitempty"`
+	DefaultReasoningEffort    string   `json:"default_reasoning_effort,omitempty"`
 }
 
-// UnmarshalJSON accepts the context-window field names commonly exposed by
-// OpenAI-compatible servers and normalizes them to context_length on output.
+// UnmarshalJSON accepts common model metadata extensions exposed by
+// OpenAI-compatible servers and normalizes them to the common output fields.
 func (m *Model) UnmarshalJSON(data []byte) error {
 	type model Model
 	var decoded model
@@ -288,6 +293,20 @@ func (m *Model) UnmarshalJSON(data []byte) error {
 			if value := positiveJSONInt(fields[name]); value > 0 {
 				m.MaxOutputTokens = value
 				break
+			}
+		}
+	}
+	if reasoningData := fields["reasoning"]; len(reasoningData) > 0 {
+		var reasoning struct {
+			SupportedEfforts []string `json:"supported_efforts"`
+			DefaultEffort    string   `json:"default_effort"`
+		}
+		if json.Unmarshal(reasoningData, &reasoning) == nil {
+			if len(m.SupportedReasoningEfforts) == 0 {
+				m.SupportedReasoningEfforts = append([]string(nil), reasoning.SupportedEfforts...)
+			}
+			if m.DefaultReasoningEffort == "" {
+				m.DefaultReasoningEffort = reasoning.DefaultEffort
 			}
 		}
 	}

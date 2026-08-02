@@ -144,6 +144,7 @@ func decodeChatRequest(reader io.Reader) (llmprovider.ChatRequest, bool, error) 
 	for _, key := range []string{
 		"model", "messages", "temperature", "top_p", "max_tokens", "max_completion_tokens",
 		"stop", "tools", "tool_choice", "parallel_tool_calls", "stream", "conversation_id",
+		"reasoning_effort",
 	} {
 		delete(extra, key)
 	}

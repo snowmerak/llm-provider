@@ -13,6 +13,7 @@ import (
 )
 
 const defaultOpenRouterBaseURL = "https://openrouter.ai/api/v1"
+const defaultXAIBaseURL = "https://api.x.ai/v1"
 
 type Config struct {
 	Listen                    string           `json:"listen"`
@@ -158,12 +159,15 @@ func (p ProviderConfig) validate() error {
 		return fmt.Errorf("provider %q prefix %q contains '/'", p.ID, prefix)
 	}
 	switch p.Type {
-	case "anthropic", "claude", "codex", "codex-app-server", "openrouter", "openai-compatible":
+	case "anthropic", "claude", "codex", "codex-app-server", "grok", "xai", "openrouter", "openai-compatible":
 	default:
 		return fmt.Errorf("provider %q has unsupported type %q", p.ID, p.Type)
 	}
 	if p.Type == "openai-compatible" && p.BaseURL == "" {
 		return fmt.Errorf("provider %q requires base_url", p.ID)
+	}
+	if (p.Type == "grok" || p.Type == "xai") && p.APIKey == "" && p.APIKeyEnv == "" {
+		return fmt.Errorf("provider %q requires api_key or api_key_env", p.ID)
 	}
 	if p.Type == "codex" || p.Type == "codex-app-server" {
 		cache := p.Codex.ConversationCache
@@ -192,6 +196,21 @@ func (p ProviderConfig) validate() error {
 		}
 		if metadata.ContextLength < 0 || metadata.MaxOutputTokens < 0 {
 			return fmt.Errorf("provider %q model %q metadata values cannot be negative", p.ID, model)
+		}
+		seenEfforts := make(map[string]struct{}, len(metadata.SupportedReasoningEfforts))
+		for _, effort := range metadata.SupportedReasoningEfforts {
+			if effort == "" {
+				return fmt.Errorf("provider %q model %q has an empty reasoning effort", p.ID, model)
+			}
+			if _, duplicate := seenEfforts[effort]; duplicate {
+				return fmt.Errorf("provider %q model %q has duplicate reasoning effort %q", p.ID, model, effort)
+			}
+			seenEfforts[effort] = struct{}{}
+		}
+		if metadata.DefaultReasoningEffort != "" && len(seenEfforts) > 0 {
+			if _, supported := seenEfforts[metadata.DefaultReasoningEffort]; !supported {
+				return fmt.Errorf("provider %q model %q default reasoning effort %q is not supported", p.ID, model, metadata.DefaultReasoningEffort)
+			}
 		}
 	}
 	return nil

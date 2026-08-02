@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -47,6 +48,7 @@ type route struct {
 	provider               llmprovider.Provider
 	models                 []string
 	modelMetadata          map[string]llmprovider.ModelMetadata
+	modelCapabilityProfile string
 	forwardHeaders         map[string]struct{}
 	forwardResponseHeaders map[string]struct{}
 	modelMu                sync.RWMutex
@@ -107,6 +109,7 @@ func NewContext(ctx context.Context, config Config) (*Gateway, error) {
 			id: providerConfig.ID, prefix: prefix, provider: provider,
 			models:                 append([]string(nil), providerConfig.Models...),
 			modelMetadata:          cloneModelMetadata(providerConfig.ModelMetadata),
+			modelCapabilityProfile: providerModelCapabilityProfile(providerConfig),
 			forwardHeaders:         headerSet(append(defaultRequestHeaders, providerConfig.ForwardHeaders...)),
 			forwardResponseHeaders: headerSet(append(defaultResponseHeaders, providerConfig.ForwardResponseHeaders...)),
 		}
@@ -262,10 +265,13 @@ func buildProvider(config ProviderConfig) (llmprovider.Provider, error) {
 			options = append(options, codex.WithConversationCache(conversationCache, ttl))
 		}
 		return codex.New(options...), nil
-	case "openrouter", "openai-compatible":
+	case "grok", "xai", "openrouter", "openai-compatible":
 		baseURL := config.BaseURL
 		if config.Type == "openrouter" && baseURL == "" {
 			baseURL = defaultOpenRouterBaseURL
+		}
+		if (config.Type == "grok" || config.Type == "xai") && baseURL == "" {
+			baseURL = defaultXAIBaseURL
 		}
 		apiKey := config.APIKey
 		if config.APIKeyEnv != "" {
@@ -274,10 +280,13 @@ func buildProvider(config ProviderConfig) (llmprovider.Provider, error) {
 				return nil, fmt.Errorf("gateway: provider %q environment variable %s is empty", config.ID, config.APIKeyEnv)
 			}
 		}
-		if config.Type == "openrouter" && apiKey == "" {
+		if (config.Type == "openrouter" || config.Type == "grok" || config.Type == "xai") && apiKey == "" {
 			return nil, fmt.Errorf("gateway: provider %q requires api_key or api_key_env", config.ID)
 		}
 		options := []openai.Option{openai.WithBaseURL(baseURL), openai.WithAPIKey(apiKey)}
+		if config.Type == "openrouter" {
+			options = append(options, openai.WithReasoningEffortObject())
+		}
 		for key, value := range config.Headers {
 			options = append(options, openai.WithHeader(key, value))
 		}
@@ -327,6 +336,7 @@ func (g *Gateway) discoverRouteModels(ctx context.Context, route *route) ([]llmp
 		if err != nil {
 			return nil, fmt.Errorf("gateway: list models for %q: %w", route.id, err)
 		}
+		applyKnownModelCapabilities(route, listed)
 		applyModelOverrides(route, listed)
 		return prefixedModels(route, listed), nil
 	}
@@ -348,11 +358,57 @@ func (g *Gateway) discoverRouteModels(ctx context.Context, route *route) ([]llmp
 			model.Created = upstream.Created
 			model.ContextLength = upstream.ContextLength
 			model.MaxOutputTokens = upstream.MaxOutputTokens
+			model.SupportedReasoningEfforts = append([]string(nil), upstream.SupportedReasoningEfforts...)
+			model.DefaultReasoningEffort = upstream.DefaultReasoningEffort
 		}
 		listed = append(listed, model)
 	}
+	applyKnownModelCapabilities(route, listed)
 	applyModelOverrides(route, listed)
 	return prefixedModels(route, listed), nil
+}
+
+func providerModelCapabilityProfile(config ProviderConfig) string {
+	if config.Type == "grok" || config.Type == "xai" {
+		return "xai"
+	}
+	if config.Type != "openai-compatible" || config.BaseURL == "" {
+		return ""
+	}
+	endpoint, err := url.Parse(config.BaseURL)
+	if err == nil && strings.EqualFold(endpoint.Hostname(), "api.x.ai") {
+		return "xai"
+	}
+	return ""
+}
+
+func applyKnownModelCapabilities(route *route, models []llmprovider.Model) {
+	if route.modelCapabilityProfile != "xai" {
+		return
+	}
+	for index := range models {
+		efforts, defaultEffort, known := knownXAIReasoningCapabilities(models[index].ID)
+		if !known {
+			continue
+		}
+		if len(models[index].SupportedReasoningEfforts) == 0 {
+			models[index].SupportedReasoningEfforts = efforts
+		}
+		if models[index].DefaultReasoningEffort == "" {
+			models[index].DefaultReasoningEffort = defaultEffort
+		}
+	}
+}
+
+func knownXAIReasoningCapabilities(model string) ([]string, string, bool) {
+	switch model {
+	case "grok-4.5", "grok-4.5-latest", "grok-build-latest":
+		return []string{"low", "medium", "high"}, "high", true
+	case "grok-4.20-multi-agent":
+		return []string{"low", "medium", "high", "xhigh"}, "", true
+	default:
+		return nil, "", false
+	}
 }
 
 func (g *Gateway) refreshModelCache(ctx context.Context) {
@@ -411,6 +467,12 @@ func applyModelOverrides(route *route, models []llmprovider.Model) {
 		if override.MaxOutputTokens > 0 {
 			models[index].MaxOutputTokens = override.MaxOutputTokens
 		}
+		if len(override.SupportedReasoningEfforts) > 0 {
+			models[index].SupportedReasoningEfforts = append([]string(nil), override.SupportedReasoningEfforts...)
+		}
+		if override.DefaultReasoningEffort != "" {
+			models[index].DefaultReasoningEffort = override.DefaultReasoningEffort
+		}
 	}
 }
 
@@ -420,6 +482,7 @@ func cloneModelMetadata(source map[string]llmprovider.ModelMetadata) map[string]
 	}
 	result := make(map[string]llmprovider.ModelMetadata, len(source))
 	for model, metadata := range source {
+		metadata.SupportedReasoningEfforts = append([]string(nil), metadata.SupportedReasoningEfforts...)
 		result[model] = metadata
 	}
 	return result

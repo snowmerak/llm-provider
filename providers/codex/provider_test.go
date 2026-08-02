@@ -130,7 +130,15 @@ func TestListModelsPreservesContextLength(t *testing.T) {
 				fake.send(map[string]any{"id": request.ID, "result": map[string]any{}})
 			case "model/list":
 				fake.send(map[string]any{"id": request.ID, "result": map[string]any{
-					"data": []map[string]any{{"id": "picker-id", "model": "codex-test", "contextWindow": 400000}},
+					"data": []map[string]any{{
+						"id": "picker-id", "model": "codex-test", "contextWindow": 400000,
+						"defaultReasoningEffort": "medium",
+						"supportedReasoningEfforts": []map[string]any{
+							{"reasoningEffort": "low", "description": "Fast"},
+							{"reasoningEffort": "medium", "description": "Balanced"},
+							{"reasoningEffort": "high", "description": "Deep"},
+						},
+					}},
 				}})
 				return
 			}
@@ -141,7 +149,9 @@ func TestListModelsPreservesContextLength(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(models) != 1 || models[0].ID != "codex-test" || models[0].ContextLength != 258400 {
+	if len(models) != 1 || models[0].ID != "codex-test" || models[0].ContextLength != 258400 ||
+		models[0].DefaultReasoningEffort != "medium" ||
+		!slices.Equal(models[0].SupportedReasoningEfforts, []string{"low", "medium", "high"}) {
 		t.Fatalf("models = %#v", models)
 	}
 }

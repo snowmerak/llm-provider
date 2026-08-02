@@ -27,6 +27,9 @@ func TestChatWithTools(t *testing.T) {
 		if body["stream"] != false || body["tool_choice"] != "auto" || body["parallel_tool_calls"] != true {
 			t.Errorf("tool options = %#v", body)
 		}
+		if body["reasoning_effort"] != "high" {
+			t.Errorf("reasoning effort = %#v", body["reasoning_effort"])
+		}
 		tools, ok := body["tools"].([]any)
 		if !ok || len(tools) != 1 {
 			t.Fatalf("tools = %#v", body["tools"])
@@ -47,6 +50,7 @@ func TestChatWithTools(t *testing.T) {
 		}}},
 		ToolChoice:        llmprovider.ToolChoiceAuto,
 		ParallelToolCalls: &parallel,
+		ReasoningEffort:   "high",
 	})
 	if err != nil {
 		t.Fatal(err)

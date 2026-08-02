@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -133,7 +134,8 @@ func TestListModelsPreservesContextLength(t *testing.T) {
 		}
 		_, _ = io.WriteString(writer, `{"data":[{`+
 			`"id":"claude-test","type":"model","created_at":"2026-06-29T00:00:00Z",`+
-			`"max_input_tokens":1000000,"max_tokens":128000}]}`)
+			`"max_input_tokens":1000000,"max_tokens":128000,`+
+			`"capabilities":{"effort":{"supported":true,"low":{"supported":true},"medium":{"supported":true},"high":{"supported":true},"xhigh":{"supported":false},"max":{"supported":true}}}}]}`)
 	}))
 	defer server.Close()
 
@@ -143,7 +145,9 @@ func TestListModelsPreservesContextLength(t *testing.T) {
 	}
 	if len(models) != 1 || models[0].ID != "claude-test" || models[0].Object != "model" ||
 		models[0].OwnedBy != "anthropic" || models[0].Created != 1782691200 ||
-		models[0].ContextLength != 1000000 || models[0].MaxOutputTokens != 128000 {
+		models[0].ContextLength != 1000000 || models[0].MaxOutputTokens != 128000 ||
+		models[0].DefaultReasoningEffort != "high" ||
+		!slices.Equal(models[0].SupportedReasoningEfforts, []string{"low", "medium", "high", "max"}) {
 		t.Fatalf("models = %#v", models)
 	}
 }

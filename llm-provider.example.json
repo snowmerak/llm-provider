@@ -84,7 +84,7 @@
     },
     {
       "id": "grok",
-      "type": "openai-compatible",
+      "type": "xai",
       "prefix": "grok",
       "enabled": false,
       "base_url": "https://api.x.ai/v1",

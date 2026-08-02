@@ -62,3 +62,32 @@ func TestModelNormalizesMaxOutputTokenAliases(t *testing.T) {
 		t.Fatalf("wire model = %s", data)
 	}
 }
+
+func TestModelPreservesReasoningEffortMetadata(t *testing.T) {
+	var model Model
+	if err := json.Unmarshal([]byte(`{"id":"a","supported_reasoning_efforts":["low","medium","high"],"default_reasoning_effort":"medium"}`), &model); err != nil {
+		t.Fatal(err)
+	}
+	if model.DefaultReasoningEffort != "medium" || len(model.SupportedReasoningEfforts) != 3 ||
+		model.SupportedReasoningEfforts[2] != "high" {
+		t.Fatalf("model = %#v", model)
+	}
+	data, err := json.Marshal(model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !json.Valid(data) || string(data) == "" {
+		t.Fatalf("model JSON = %s", data)
+	}
+}
+
+func TestModelNormalizesOpenRouterReasoningMetadata(t *testing.T) {
+	var model Model
+	if err := json.Unmarshal([]byte(`{"id":"a","reasoning":{"supported_efforts":["high","medium","low","minimal"],"default_effort":"medium","mandatory":true}}`), &model); err != nil {
+		t.Fatal(err)
+	}
+	if model.DefaultReasoningEffort != "medium" || len(model.SupportedReasoningEfforts) != 4 ||
+		model.SupportedReasoningEfforts[3] != "minimal" {
+		t.Fatalf("model = %#v", model)
+	}
+}

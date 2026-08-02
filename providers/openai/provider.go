@@ -20,11 +20,12 @@ import (
 const defaultBaseURL = "https://api.openai.com/v1"
 
 type config struct {
-	baseURL    string
-	apiKey     string
-	httpClient *http.Client
-	headers    http.Header
-	body       map[string]any
+	baseURL               string
+	apiKey                string
+	httpClient            *http.Client
+	headers               http.Header
+	body                  map[string]any
+	reasoningEffortObject bool
 }
 
 type Option func(*config)
@@ -59,6 +60,13 @@ func WithBodyField(key string, value any) Option {
 			c.body[key] = value
 		}
 	}
+}
+
+// WithReasoningEffortObject maps ChatRequest.ReasoningEffort to
+// reasoning.effort instead of the OpenAI reasoning_effort field. OpenRouter
+// uses this request shape for Chat Completions.
+func WithReasoningEffortObject() Option {
+	return func(c *config) { c.reasoningEffortObject = true }
 }
 
 type Provider struct {
@@ -245,6 +253,20 @@ func (p *Provider) do(ctx context.Context, request llmprovider.ChatRequest, stre
 	setOptional(payload, "max_tokens", request.MaxTokens)
 	setOptional(payload, "max_completion_tokens", request.MaxCompletionTokens)
 	setOptional(payload, "parallel_tool_calls", request.ParallelToolCalls)
+	if request.ReasoningEffort != "" {
+		if p.config.reasoningEffortObject {
+			reasoning := make(map[string]any)
+			if configured, ok := payload["reasoning"].(map[string]any); ok {
+				for key, value := range configured {
+					reasoning[key] = value
+				}
+			}
+			reasoning["effort"] = request.ReasoningEffort
+			payload["reasoning"] = reasoning
+		} else {
+			payload["reasoning_effort"] = request.ReasoningEffort
+		}
+	}
 	if len(request.Stop) > 0 {
 		payload["stop"] = request.Stop
 	}

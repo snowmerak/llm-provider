@@ -116,12 +116,15 @@ Example response:
   "object": "model",
   "created": 1785572356,
   "owned_by": "omlx",
-  "context_length": 262144
+  "context_length": 262144,
+  "supported_reasoning_efforts": ["low", "medium", "high"],
+  "default_reasoning_effort": "medium"
 }
 ```
 
-Providers can override limits for individual backend model IDs. Explicit
-configuration takes precedence over discovered metadata:
+Providers can override limits and reasoning capabilities for individual
+backend model IDs. Explicit configuration takes precedence over discovered
+metadata:
 
 ```json
 {
@@ -129,7 +132,9 @@ configuration takes precedence over discovered metadata:
   "model_metadata": {
     "claude-sonnet-5": {
       "context_length": 1000000,
-      "max_output_tokens": 128000
+      "max_output_tokens": 128000,
+      "supported_reasoning_efforts": ["low", "medium", "high"],
+      "default_reasoning_effort": "medium"
     }
   }
 }
@@ -138,9 +143,17 @@ configuration takes precedence over discovered metadata:
 Claude `max_input_tokens` and `max_tokens` are normalized to `context_length`
 and `max_output_tokens`. Its RFC 3339 `created_at` value is converted to the
 Unix timestamp used by the OpenAI-compatible model object. Codex `model/list`
-currently has no context-window field; after the first turn, the Gateway learns
-the effective value from `thread/tokenUsage/updated` and includes it in later
-model responses unless configuration overrides it.
+advertises `supportedReasoningEfforts` and `defaultReasoningEffort`, Anthropic
+advertises `capabilities.effort`, and OpenRouter advertises
+`reasoning.supported_efforts` and `reasoning.default_effort`; these are
+normalized to the snake-case model fields shown above. Providers whose model
+catalog does not advertise reasoning capabilities can supply them through
+`model_metadata`. The `xai`/`grok` provider profile fills the documented Grok
+effort levels even though xAI's model-list response does not include them.
+Codex `model/list` currently has no context-window field;
+after the first turn, the Gateway learns the effective value from
+`thread/tokenUsage/updated` and includes it in later model responses unless
+configuration overrides it.
 
 ### Chat Completions
 
@@ -175,6 +188,7 @@ curl http://127.0.0.1:8080/v1/responses \
   -d '{
     "model": "codex/gpt-5.6-luna",
     "instructions": "Always answer concisely.",
+    "reasoning": {"effort": "medium"},
     "input": "Describe this repository in one sentence."
   }'
 ```
@@ -183,6 +197,9 @@ OpenAI-compatible providers receive `/responses` requests and SSE events
 natively, with unknown fields preserved. Providers that expose only Chat are
 adapted for the common text/message/function-tool subset. The lifecycle APIs
 for stored or background Responses are intentionally not implemented yet.
+The adapter maps `reasoning.effort` to the selected provider's native effort
+setting. Chat Completions accepts the equivalent top-level
+`reasoning_effort` field.
 
 ### Embeddings
 

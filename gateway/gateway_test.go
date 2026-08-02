@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -188,7 +189,7 @@ func TestModelsAndChatRouting(t *testing.T) {
 			if request.Header.Get("Authorization") != "Bearer backend-secret" {
 				t.Errorf("model authorization = %q", request.Header.Get("Authorization"))
 			}
-			_, _ = io.WriteString(writer, `{"object":"list","data":[{"id":"vendor/model-a","object":"model","owned_by":"vendor","max_model_len":262144}]}`)
+			_, _ = io.WriteString(writer, `{"object":"list","data":[{"id":"vendor/model-a","object":"model","owned_by":"vendor","max_model_len":262144,"reasoning":{"supported_efforts":["high","medium","low"],"default_effort":"medium"}}]}`)
 		case "/v1/chat/completions":
 			if request.Header.Get("Authorization") != "Bearer backend-secret" {
 				t.Errorf("chat authorization = %q", request.Header.Get("Authorization"))
@@ -208,6 +209,9 @@ func TestModelsAndChatRouting(t *testing.T) {
 			if body["model"] != "vendor/model-a" || body["prompt_cache_key"] != "cache-key-1" {
 				t.Errorf("upstream body = %#v", body)
 			}
+			if body["reasoning"].(map[string]any)["effort"] != "high" {
+				t.Errorf("reasoning = %#v", body["reasoning"])
+			}
 			if body["cache_control"].(map[string]any)["type"] != "ephemeral" {
 				t.Errorf("default cache body = %#v", body["cache_control"])
 			}
@@ -225,7 +229,7 @@ func TestModelsAndChatRouting(t *testing.T) {
 	defer upstream.Close()
 
 	gateway, err := New(Config{Providers: []ProviderConfig{{
-		ID: "router", Type: "openai-compatible", Prefix: "openrouter", Enabled: true,
+		ID: "router", Type: "openrouter", Prefix: "openrouter", Enabled: true,
 		BaseURL: upstream.URL + "/v1", APIKey: "backend-secret",
 		Body: map[string]any{"cache_control": map[string]any{"type": "ephemeral"}},
 	}}})
@@ -243,15 +247,18 @@ func TestModelsAndChatRouting(t *testing.T) {
 	defer modelResponse.Body.Close()
 	var models struct {
 		Data []struct {
-			ID            string `json:"id"`
-			ContextLength int64  `json:"context_length"`
+			ID                        string   `json:"id"`
+			ContextLength             int64    `json:"context_length"`
+			SupportedReasoningEfforts []string `json:"supported_reasoning_efforts"`
+			DefaultReasoningEffort    string   `json:"default_reasoning_effort"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(modelResponse.Body).Decode(&models); err != nil {
 		t.Fatal(err)
 	}
 	if len(models.Data) != 1 || models.Data[0].ID != "openrouter/vendor/model-a" ||
-		models.Data[0].ContextLength != 262144 {
+		models.Data[0].ContextLength != 262144 || models.Data[0].DefaultReasoningEffort != "medium" ||
+		!slices.Equal(models.Data[0].SupportedReasoningEfforts, []string{"high", "medium", "low"}) {
 		t.Fatalf("models = %#v", models.Data)
 	}
 	detailResponse, err := http.Get(server.URL + "/v1/models/openrouter/vendor/model-a")
@@ -260,18 +267,21 @@ func TestModelsAndChatRouting(t *testing.T) {
 	}
 	defer detailResponse.Body.Close()
 	var detail struct {
-		ID            string `json:"id"`
-		ContextLength int64  `json:"context_length"`
+		ID                        string   `json:"id"`
+		ContextLength             int64    `json:"context_length"`
+		SupportedReasoningEfforts []string `json:"supported_reasoning_efforts"`
+		DefaultReasoningEffort    string   `json:"default_reasoning_effort"`
 	}
 	if err := json.NewDecoder(detailResponse.Body).Decode(&detail); err != nil {
 		t.Fatal(err)
 	}
 	if detailResponse.StatusCode != http.StatusOK || detail.ID != "openrouter/vendor/model-a" ||
-		detail.ContextLength != 262144 {
+		detail.ContextLength != 262144 || detail.DefaultReasoningEffort != "medium" ||
+		!slices.Equal(detail.SupportedReasoningEfforts, []string{"high", "medium", "low"}) {
 		t.Fatalf("model detail status=%d body=%#v", detailResponse.StatusCode, detail)
 	}
 
-	body := `{"model":"openrouter/vendor/model-a","messages":[{"role":"user","content":[{"type":"text","text":"hello","cache_control":{"type":"ephemeral"}}]}],"prompt_cache_key":"cache-key-1"}`
+	body := `{"model":"openrouter/vendor/model-a","messages":[{"role":"user","content":[{"type":"text","text":"hello","cache_control":{"type":"ephemeral"}}]}],"prompt_cache_key":"cache-key-1","reasoning_effort":"high"}`
 	request, err := http.NewRequest(http.MethodPost, server.URL+"/v1/chat/completions", strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
@@ -316,7 +326,7 @@ func TestStaticModelAllowlistIsEnrichedFromUpstream(t *testing.T) {
 			return
 		}
 		_, _ = io.WriteString(writer, `{"object":"list","data":[`+
-			`{"id":"allowed","context_window":131072,"max_tokens":4096},`+
+			`{"id":"allowed","context_window":131072,"max_tokens":4096,"supported_reasoning_efforts":["low","medium"],"default_reasoning_effort":"medium"},`+
 			`{"id":"not-allowed","context_window":262144}]}`)
 	}))
 	defer upstream.Close()
@@ -325,7 +335,10 @@ func TestStaticModelAllowlistIsEnrichedFromUpstream(t *testing.T) {
 		ID: "local", Type: "openai-compatible", Enabled: true,
 		BaseURL: upstream.URL + "/v1", Models: []string{"allowed"},
 		ModelMetadata: map[string]llmprovider.ModelMetadata{
-			"allowed": {ContextLength: 200000, MaxOutputTokens: 8192},
+			"allowed": {
+				ContextLength: 200000, MaxOutputTokens: 8192,
+				SupportedReasoningEfforts: []string{"low", "high"}, DefaultReasoningEffort: "high",
+			},
 		},
 	}}})
 	if err != nil {
@@ -338,8 +351,55 @@ func TestStaticModelAllowlistIsEnrichedFromUpstream(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(models) != 1 || models[0].ID != "local/allowed" ||
-		models[0].ContextLength != 200000 || models[0].MaxOutputTokens != 8192 {
+		models[0].ContextLength != 200000 || models[0].MaxOutputTokens != 8192 ||
+		models[0].DefaultReasoningEffort != "high" ||
+		!slices.Equal(models[0].SupportedReasoningEfforts, []string{"low", "high"}) {
 		t.Fatalf("models = %#v", models)
+	}
+}
+
+func TestXAIModelsIncludeKnownReasoningCapabilities(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/v1/models" {
+			http.NotFound(writer, request)
+			return
+		}
+		_, _ = io.WriteString(writer, `{"object":"list","data":[`+
+			`{"id":"grok-4.5","object":"model","owned_by":"xai"},`+
+			`{"id":"grok-4.20-multi-agent","object":"model","owned_by":"xai"},`+
+			`{"id":"grok-unknown","object":"model","owned_by":"xai"}]}`)
+	}))
+	defer upstream.Close()
+
+	gateway, err := New(Config{Providers: []ProviderConfig{{
+		ID: "grok", Type: "xai", Enabled: true, BaseURL: upstream.URL + "/v1", APIKey: "secret",
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gateway.Close()
+
+	models, err := gateway.Models(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 3 {
+		t.Fatalf("models = %#v", models)
+	}
+	if models[0].ID != "grok/grok-4.5" || models[0].DefaultReasoningEffort != "high" ||
+		!slices.Equal(models[0].SupportedReasoningEfforts, []string{"low", "medium", "high"}) {
+		t.Fatalf("grok-4.5 = %#v", models[0])
+	}
+	if !slices.Equal(models[1].SupportedReasoningEfforts, []string{"low", "medium", "high", "xhigh"}) {
+		t.Fatalf("grok-4.20-multi-agent = %#v", models[1])
+	}
+	if len(models[2].SupportedReasoningEfforts) != 0 {
+		t.Fatalf("unknown Grok model was guessed: %#v", models[2])
+	}
+	if profile := providerModelCapabilityProfile(ProviderConfig{
+		Type: "openai-compatible", BaseURL: "https://api.x.ai/v1",
+	}); profile != "xai" {
+		t.Fatalf("xAI-compatible profile = %q", profile)
 	}
 }
 
@@ -386,7 +446,7 @@ func TestLoadConfigExpandsEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = io.WriteString(file, `{"listen":":8080","providers":[{"id":"local","type":"openai-compatible","enabled":true,"base_url":"http://localhost","api_key":"${TEST_GATEWAY_API_KEY}","body":{"prompt_cache_key":"${TEST_CACHE_KEY}","nested":{"value":"${TEST_CACHE_KEY}"}},"model_metadata":{"test-model":{"context_length":123456,"max_output_tokens":8192}}}]}`)
+	_, _ = io.WriteString(file, `{"listen":":8080","providers":[{"id":"local","type":"openai-compatible","enabled":true,"base_url":"http://localhost","api_key":"${TEST_GATEWAY_API_KEY}","body":{"prompt_cache_key":"${TEST_CACHE_KEY}","nested":{"value":"${TEST_CACHE_KEY}"}},"model_metadata":{"test-model":{"context_length":123456,"max_output_tokens":8192,"supported_reasoning_efforts":["low","high"],"default_reasoning_effort":"high"}}}]}`)
 	_ = file.Close()
 	config, err := LoadConfig(file.Name())
 	if err != nil {
@@ -400,7 +460,9 @@ func TestLoadConfigExpandsEnvironment(t *testing.T) {
 		t.Fatalf("expanded body = %#v", config.Providers[0].Body)
 	}
 	metadata := config.Providers[0].ModelMetadata["test-model"]
-	if metadata.ContextLength != 123456 || metadata.MaxOutputTokens != 8192 {
+	if metadata.ContextLength != 123456 || metadata.MaxOutputTokens != 8192 ||
+		metadata.DefaultReasoningEffort != "high" ||
+		!slices.Equal(metadata.SupportedReasoningEfforts, []string{"low", "high"}) {
 		t.Fatalf("model metadata = %#v", metadata)
 	}
 }
@@ -626,6 +688,7 @@ func TestResponsesChatAdapterCommonSubset(t *testing.T) {
 		},
 		Tools:      []map[string]any{{"type": "function", "name": "lookup", "description": "Lookup", "parameters": map[string]any{"type": "object"}}},
 		ToolChoice: map[string]any{"type": "function", "name": "lookup"},
+		Reasoning:  &responseReasoning{Effort: "high"},
 	}
 	chat, err := responseToChat(decoded)
 	if err != nil {
@@ -637,9 +700,27 @@ func TestResponsesChatAdapterCommonSubset(t *testing.T) {
 	if len(chat.Tools) != 1 || chat.Tools[0].Function.Name != "lookup" {
 		t.Fatalf("tools = %#v", chat.Tools)
 	}
+	if chat.ReasoningEffort != "high" {
+		t.Fatalf("reasoning effort = %q", chat.ReasoningEffort)
+	}
 	choice := chat.ToolChoice.(map[string]any)
 	if choice["function"].(map[string]string)["name"] != "lookup" {
 		t.Fatalf("tool choice = %#v", chat.ToolChoice)
+	}
+}
+
+func TestDecodeChatRequestReasoningEffort(t *testing.T) {
+	request, stream, err := decodeChatRequest(strings.NewReader(
+		`{"model":"codex/model","messages":[{"role":"user","content":"hello"}],"reasoning_effort":"high"}`,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stream || request.ReasoningEffort != "high" {
+		t.Fatalf("stream=%v reasoning effort=%q", stream, request.ReasoningEffort)
+	}
+	if _, duplicate := request.Extra["reasoning_effort"]; duplicate {
+		t.Fatalf("reasoning_effort was also retained as an extension: %#v", request.Extra)
 	}
 }
 
