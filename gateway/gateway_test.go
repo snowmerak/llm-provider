@@ -48,10 +48,6 @@ func TestModelCacheWarmsAtStartupAndServesReadsWithoutDiscovery(t *testing.T) {
 		if len(models) != 1 || models[0].ID != "local/cached-model" {
 			t.Fatalf("models = %#v", models)
 		}
-		if reasoning := models[0].Capabilities.Reasoning; reasoning.Control != llmprovider.ReasoningControlEffort ||
-			!slices.Equal(reasoning.SupportedEfforts, defaultReasoningEfforts) {
-			t.Fatalf("fallback reasoning = %#v", reasoning)
-		}
 	}
 	if _, err := gateway.Model(t.Context(), "local/cached-model"); err != nil {
 		t.Fatal(err)
@@ -366,7 +362,7 @@ func TestStaticModelAllowlistIsEnrichedFromUpstream(t *testing.T) {
 	}
 }
 
-func TestXAIModelsUseDefaultReasoningCapabilitiesWithoutDiscovery(t *testing.T) {
+func TestXAIModelsIncludeKnownReasoningCapabilities(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/v1/models" {
 			http.NotFound(writer, request)
@@ -394,12 +390,21 @@ func TestXAIModelsUseDefaultReasoningCapabilitiesWithoutDiscovery(t *testing.T) 
 	if len(models) != 3 {
 		t.Fatalf("models = %#v", models)
 	}
-	for _, model := range models {
-		reasoning := model.Capabilities.Reasoning
-		if reasoning.Control != llmprovider.ReasoningControlEffort || reasoning.DefaultEffort != "" || reasoning.Mandatory ||
-			!slices.Equal(reasoning.SupportedEfforts, defaultReasoningEfforts) {
-			t.Fatalf("Grok fallback = %#v", model)
-		}
+	firstReasoning := models[0].Capabilities.Reasoning
+	if models[0].ID != "grok/grok-4.5" || firstReasoning.DefaultEffort != "high" || !firstReasoning.Mandatory ||
+		!slices.Equal(firstReasoning.SupportedEfforts, []string{"low", "medium", "high"}) {
+		t.Fatalf("grok-4.5 = %#v", models[0])
+	}
+	if !slices.Equal(models[1].Capabilities.Reasoning.SupportedEfforts, []string{"low", "medium", "high", "xhigh"}) {
+		t.Fatalf("grok-4.20-multi-agent = %#v", models[1])
+	}
+	if models[2].Capabilities != nil {
+		t.Fatalf("unknown Grok model was guessed: %#v", models[2])
+	}
+	if profile := providerModelCapabilityProfile(ProviderConfig{
+		Type: "openai-compatible", BaseURL: "https://api.x.ai/v1",
+	}); profile != "xai" {
+		t.Fatalf("xAI-compatible profile = %q", profile)
 	}
 }
 

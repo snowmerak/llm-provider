@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -34,16 +35,6 @@ var defaultResponseHeaders = []string{
 	"Request-Id",
 }
 
-var defaultReasoningEfforts = []string{
-	"none",
-	"minimal",
-	"low",
-	"medium",
-	"high",
-	"xhigh",
-	"max",
-}
-
 const (
 	defaultModelCacheRefreshInterval = 15 * time.Minute
 	defaultModelCacheRefreshTimeout  = 10 * time.Second
@@ -57,6 +48,7 @@ type route struct {
 	provider               llmprovider.Provider
 	models                 []string
 	modelMetadata          map[string]llmprovider.ModelMetadata
+	modelCapabilityProfile string
 	forwardHeaders         map[string]struct{}
 	forwardResponseHeaders map[string]struct{}
 	modelMu                sync.RWMutex
@@ -117,6 +109,7 @@ func NewContext(ctx context.Context, config Config) (*Gateway, error) {
 			id: providerConfig.ID, prefix: prefix, provider: provider,
 			models:                 append([]string(nil), providerConfig.Models...),
 			modelMetadata:          cloneModelMetadata(providerConfig.ModelMetadata),
+			modelCapabilityProfile: providerModelCapabilityProfile(providerConfig),
 			forwardHeaders:         headerSet(append(defaultRequestHeaders, providerConfig.ForwardHeaders...)),
 			forwardResponseHeaders: headerSet(append(defaultResponseHeaders, providerConfig.ForwardResponseHeaders...)),
 		}
@@ -343,8 +336,8 @@ func (g *Gateway) discoverRouteModels(ctx context.Context, route *route) ([]llmp
 		if err != nil {
 			return nil, fmt.Errorf("gateway: list models for %q: %w", route.id, err)
 		}
+		applyKnownModelCapabilities(route, listed)
 		applyModelOverrides(route, listed)
-		applyDefaultReasoningCapabilities(listed)
 		return prefixedModels(route, listed), nil
 	}
 
@@ -369,24 +362,55 @@ func (g *Gateway) discoverRouteModels(ctx context.Context, route *route) ([]llmp
 		}
 		listed = append(listed, model)
 	}
+	applyKnownModelCapabilities(route, listed)
 	applyModelOverrides(route, listed)
-	applyDefaultReasoningCapabilities(listed)
 	return prefixedModels(route, listed), nil
 }
 
-func applyDefaultReasoningCapabilities(models []llmprovider.Model) {
+func providerModelCapabilityProfile(config ProviderConfig) string {
+	if config.Type == "grok" || config.Type == "xai" {
+		return "xai"
+	}
+	if config.Type != "openai-compatible" || config.BaseURL == "" {
+		return ""
+	}
+	endpoint, err := url.Parse(config.BaseURL)
+	if err == nil && strings.EqualFold(endpoint.Hostname(), "api.x.ai") {
+		return "xai"
+	}
+	return ""
+}
+
+func applyKnownModelCapabilities(route *route, models []llmprovider.Model) {
+	if route.modelCapabilityProfile != "xai" {
+		return
+	}
 	for index := range models {
-		if models[index].Capabilities == nil {
-			models[index].Capabilities = &llmprovider.ModelCapabilities{}
-		}
-		if models[index].Capabilities.Reasoning != nil {
+		reasoning, known := knownXAIReasoningCapabilities(models[index].ID)
+		if !known {
 			continue
 		}
-		models[index].Capabilities.Reasoning = &llmprovider.ReasoningCapabilities{
-			Supported:        true,
-			Control:          llmprovider.ReasoningControlEffort,
-			SupportedEfforts: append([]string(nil), defaultReasoningEfforts...),
+		if models[index].Capabilities == nil || models[index].Capabilities.Reasoning == nil {
+			models[index].Capabilities = &llmprovider.ModelCapabilities{Reasoning: reasoning}
 		}
+	}
+}
+
+func knownXAIReasoningCapabilities(model string) (*llmprovider.ReasoningCapabilities, bool) {
+	switch model {
+	case "grok-4.5", "grok-4.5-latest", "grok-build-latest":
+		return &llmprovider.ReasoningCapabilities{
+			Supported: true, Control: llmprovider.ReasoningControlEffort,
+			SupportedEfforts: []string{"low", "medium", "high"}, DefaultEffort: "high",
+			Mandatory: true,
+		}, true
+	case "grok-4.20-multi-agent":
+		return &llmprovider.ReasoningCapabilities{
+			Supported: true, Control: llmprovider.ReasoningControlEffort,
+			SupportedEfforts: []string{"low", "medium", "high", "xhigh"},
+		}, true
+	default:
+		return nil, false
 	}
 }
 
