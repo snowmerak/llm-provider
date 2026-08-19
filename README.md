@@ -360,6 +360,36 @@ for current provider semantics.
 | OpenRouter prompt cache | Stable `session_id` or `X-Session-Id` | Session key and prompt prefix | `cached_tokens` |
 | OpenRouter response cache | `X-OpenRouter-Cache: true` | The complete request | `MISS`, then `HIT` response header |
 
+For Chat Completions, the Gateway automatically creates a cache-affinity
+`conversation_id` when the request does not already select a cache key. It
+maps that value to `prompt_cache_key` for OpenAI-compatible providers,
+`session_id` for OpenRouter, and `X-Grok-Conv-Id` for Grok/xAI, then returns the
+ID in regular responses and stream chunks so clients can reuse it on later
+turns. Request-scoped values and provider-level body/header defaults take
+precedence. Gateway-generated IDs are never forwarded as an upstream stateful
+`conversation_id`.
+
+Native Anthropic routes are deliberately excluded because useful Claude cache
+boundaries require explicit `cache_control` placement. Codex continues to own
+`conversation_id` as its App Server thread ID.
+
+`type` selects the transport implementation, while optional `kind` selects the
+backend semantics used for cache and known model capabilities. This matters
+when an intermediary exposes Grok through an OpenAI-compatible API:
+
+```json
+{
+  "id": "company-grok",
+  "type": "openai-compatible",
+  "kind": "grok",
+  "base_url": "https://gateway.example/v1",
+  "enabled": true
+}
+```
+
+When `kind` is omitted, it is inferred from `type`; an
+`openai-compatible` URL whose hostname is `api.x.ai` is also inferred as Grok.
+
 Use request-scoped cache options when a provider handles mixed endpoint types.
 Provider-level `headers` and `body` values are broad defaults and may be
 inappropriate for `/embeddings` or backends that do not support the same cache

@@ -406,10 +406,44 @@ func TestXAIModelsIncludeKnownReasoningCapabilities(t *testing.T) {
 	}); profile != "xai" {
 		t.Fatalf("xAI-compatible profile = %q", profile)
 	}
+	if profile := providerModelCapabilityProfile(ProviderConfig{
+		Type: "openai-compatible", Kind: "grok", BaseURL: "https://gateway.example/v1",
+	}); profile != "xai" {
+		t.Fatalf("explicit Grok kind profile = %q", profile)
+	}
+	if profile := providerModelCapabilityProfile(ProviderConfig{
+		Type: "openai-compatible", Kind: "openai", BaseURL: "https://api.x.ai/v1",
+	}); profile != "" {
+		t.Fatalf("explicit OpenAI kind was overridden by URL heuristic: %q", profile)
+	}
+}
+
+func TestProviderKindValidation(t *testing.T) {
+	for _, kind := range []string{"", "openai", "openai-compatible", "openrouter", "grok", "xai", "anthropic", "claude", "codex", "codex-app-server"} {
+		provider := ProviderConfig{ID: "custom", Type: "openai-compatible", Kind: kind, Enabled: true, BaseURL: "https://gateway.example/v1"}
+		if err := provider.validate(); err != nil {
+			t.Fatalf("kind %q: %v", kind, err)
+		}
+	}
+	provider := ProviderConfig{ID: "custom", Type: "openai-compatible", Kind: "unknown", Enabled: true, BaseURL: "https://gateway.example/v1"}
+	if err := provider.validate(); err == nil {
+		t.Fatal("unsupported provider kind was accepted")
+	}
 }
 
 func TestStreamingPreservesPrefixedModel(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodGet {
+			_, _ = io.WriteString(writer, `{"object":"list","data":[{"id":"backend"}]}`)
+			return
+		}
+		var body map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Error(err)
+		}
+		if cacheKey, _ := body["prompt_cache_key"].(string); !strings.HasPrefix(cacheKey, gatewayCacheConversationPrefix) {
+			t.Errorf("prompt cache key = %#v", body["prompt_cache_key"])
+		}
 		writer.Header().Set("Content-Type", "text/event-stream")
 		writer.Header().Set("X-OpenRouter-Cache-Status", "MISS")
 		_, _ = io.WriteString(writer, "data: {\"id\":\"chat_1\",\"object\":\"chat.completion.chunk\",\"model\":\"backend\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello\"}}]}\n\n")
@@ -439,8 +473,78 @@ func TestStreamingPreservesPrefixedModel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), `"model":"local/backend"`) || !strings.Contains(string(data), "data: [DONE]") {
+	if !strings.Contains(string(data), `"model":"local/backend"`) ||
+		!strings.Contains(string(data), `"conversation_id":"`+gatewayCacheConversationPrefix) ||
+		!strings.Contains(string(data), "data: [DONE]") {
 		t.Fatalf("stream = %s", data)
+	}
+}
+
+func TestChatPromptCacheConversationPersistsAcrossRequests(t *testing.T) {
+	cacheKeys := make(chan string, 2)
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/v1/models":
+			_, _ = io.WriteString(writer, `{"object":"list","data":[{"id":"backend"}]}`)
+		case "/v1/chat/completions":
+			var body map[string]any
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				t.Error(err)
+			}
+			if _, leaked := body["conversation_id"]; leaked {
+				t.Errorf("Gateway cache ID leaked as upstream conversation_id: %#v", body)
+			}
+			cacheKey, _ := body["prompt_cache_key"].(string)
+			cacheKeys <- cacheKey
+			_, _ = io.WriteString(writer, `{"id":"chat_1","model":"backend","conversation_id":"provider-generated","choices":[{"index":0,"message":{"role":"assistant","content":"ok"}}]}`)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer upstream.Close()
+	gateway, err := New(Config{Providers: []ProviderConfig{{
+		ID: "openai", Type: "openai-compatible", Enabled: true, BaseURL: upstream.URL + "/v1",
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gateway.Close()
+	server := httptest.NewServer(gateway.Handler())
+	defer server.Close()
+
+	call := func(conversationID string) string {
+		body := map[string]any{
+			"model": "openai/backend", "messages": []any{map[string]any{"role": "user", "content": "hello"}},
+		}
+		if conversationID != "" {
+			body["conversation_id"] = conversationID
+		}
+		encoded, _ := json.Marshal(body)
+		response, requestErr := http.Post(server.URL+"/v1/chat/completions", "application/json", bytes.NewReader(encoded))
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		defer response.Body.Close()
+		var completion struct {
+			ConversationID string `json:"conversation_id"`
+		}
+		if decodeErr := json.NewDecoder(response.Body).Decode(&completion); decodeErr != nil {
+			t.Fatal(decodeErr)
+		}
+		return completion.ConversationID
+	}
+
+	firstID := call("")
+	if !strings.HasPrefix(firstID, gatewayCacheConversationPrefix) {
+		t.Fatalf("first conversation ID = %q", firstID)
+	}
+	secondID := call(firstID)
+	if secondID != firstID {
+		t.Fatalf("second conversation ID = %q, want %q", secondID, firstID)
+	}
+	firstKey, secondKey := <-cacheKeys, <-cacheKeys
+	if firstKey != firstID || secondKey != firstID {
+		t.Fatalf("cache keys = %q, %q; want %q", firstKey, secondKey, firstID)
 	}
 }
 

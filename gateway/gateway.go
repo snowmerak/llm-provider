@@ -43,16 +43,19 @@ const (
 )
 
 type route struct {
-	id                     string
-	prefix                 string
-	provider               llmprovider.Provider
-	models                 []string
-	modelMetadata          map[string]llmprovider.ModelMetadata
-	modelCapabilityProfile string
-	forwardHeaders         map[string]struct{}
-	forwardResponseHeaders map[string]struct{}
-	modelMu                sync.RWMutex
-	cachedModels           []llmprovider.Model
+	id                      string
+	prefix                  string
+	providerType            string
+	providerKind            string
+	provider                llmprovider.Provider
+	models                  []string
+	modelMetadata           map[string]llmprovider.ModelMetadata
+	modelCapabilityProfile  string
+	cacheAffinityConfigured bool
+	forwardHeaders          map[string]struct{}
+	forwardResponseHeaders  map[string]struct{}
+	modelMu                 sync.RWMutex
+	cachedModels            []llmprovider.Model
 }
 
 type Gateway struct {
@@ -105,13 +108,16 @@ func NewContext(ctx context.Context, config Config) (*Gateway, error) {
 			_ = gateway.Close()
 			return nil, err
 		}
+		providerKind := effectiveProviderKind(providerConfig)
+		modelCapabilityProfile := providerModelCapabilityProfile(providerConfig)
 		route := &route{
-			id: providerConfig.ID, prefix: prefix, provider: provider,
-			models:                 append([]string(nil), providerConfig.Models...),
-			modelMetadata:          cloneModelMetadata(providerConfig.ModelMetadata),
-			modelCapabilityProfile: providerModelCapabilityProfile(providerConfig),
-			forwardHeaders:         headerSet(append(defaultRequestHeaders, providerConfig.ForwardHeaders...)),
-			forwardResponseHeaders: headerSet(append(defaultResponseHeaders, providerConfig.ForwardResponseHeaders...)),
+			id: providerConfig.ID, prefix: prefix, providerType: providerConfig.Type, providerKind: providerKind, provider: provider,
+			models:                  append([]string(nil), providerConfig.Models...),
+			modelMetadata:           cloneModelMetadata(providerConfig.ModelMetadata),
+			modelCapabilityProfile:  modelCapabilityProfile,
+			cacheAffinityConfigured: providerCacheAffinityConfigured(providerConfig, providerKind),
+			forwardHeaders:          headerSet(append(defaultRequestHeaders, providerConfig.ForwardHeaders...)),
+			forwardResponseHeaders:  headerSet(append(defaultResponseHeaders, providerConfig.ForwardResponseHeaders...)),
 		}
 		gateway.routes[prefix] = route
 		gateway.order = append(gateway.order, route)
@@ -368,17 +374,37 @@ func (g *Gateway) discoverRouteModels(ctx context.Context, route *route) ([]llmp
 }
 
 func providerModelCapabilityProfile(config ProviderConfig) string {
-	if config.Type == "grok" || config.Type == "xai" {
-		return "xai"
-	}
-	if config.Type != "openai-compatible" || config.BaseURL == "" {
-		return ""
-	}
-	endpoint, err := url.Parse(config.BaseURL)
-	if err == nil && strings.EqualFold(endpoint.Hostname(), "api.x.ai") {
+	if effectiveProviderKind(config) == "grok" {
 		return "xai"
 	}
 	return ""
+}
+
+func effectiveProviderKind(config ProviderConfig) string {
+	if config.Kind != "" {
+		kind, _ := canonicalProviderKind(config.Kind)
+		return kind
+	}
+	switch config.Type {
+	case "openrouter":
+		return "openrouter"
+	case "grok", "xai":
+		return "grok"
+	case "anthropic", "claude":
+		return "anthropic"
+	case "codex", "codex-app-server":
+		return "codex"
+	case "openai-compatible":
+		if config.BaseURL != "" {
+			endpoint, err := url.Parse(config.BaseURL)
+			if err == nil && strings.EqualFold(endpoint.Hostname(), "api.x.ai") {
+				return "grok"
+			}
+		}
+		return "openai"
+	default:
+		return ""
+	}
 }
 
 func applyKnownModelCapabilities(route *route, models []llmprovider.Model) {

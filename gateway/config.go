@@ -25,6 +25,7 @@ type Config struct {
 type ProviderConfig struct {
 	ID                     string                               `json:"id"`
 	Type                   string                               `json:"type"`
+	Kind                   string                               `json:"kind,omitempty"`
 	Prefix                 string                               `json:"prefix"`
 	Enabled                bool                                 `json:"enabled"`
 	BaseURL                string                               `json:"base_url,omitempty"`
@@ -163,6 +164,9 @@ func (p ProviderConfig) validate() error {
 	default:
 		return fmt.Errorf("provider %q has unsupported type %q", p.ID, p.Type)
 	}
+	if _, supported := canonicalProviderKind(p.Kind); !supported {
+		return fmt.Errorf("provider %q has unsupported kind %q", p.ID, p.Kind)
+	}
 	if p.Type == "openai-compatible" && p.BaseURL == "" {
 		return fmt.Errorf("provider %q requires base_url", p.ID)
 	}
@@ -237,4 +241,23 @@ func (p ProviderConfig) validate() error {
 		}
 	}
 	return nil
+}
+
+func canonicalProviderKind(kind string) (string, bool) {
+	switch kind {
+	case "":
+		return "", true
+	case "openai", "openai-compatible":
+		return "openai", true
+	case "openrouter":
+		return "openrouter", true
+	case "grok", "xai":
+		return "grok", true
+	case "anthropic", "claude":
+		return "anthropic", true
+	case "codex", "codex-app-server":
+		return "codex", true
+	default:
+		return "", false
+	}
 }

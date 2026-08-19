@@ -54,8 +54,13 @@ func (g *Gateway) handleChatCompletions(writer http.ResponseWriter, request *htt
 	externalModel := chatRequest.Model
 	chatRequest.Model = backendModel
 	chatRequest.Headers = selectedHeaders(request.Header, route.forwardHeaders)
+	chatRequest, cacheConversationID, err := preparePromptCache(route, chatRequest)
+	if err != nil {
+		writeError(writer, http.StatusInternalServerError, err)
+		return
+	}
 	if stream {
-		g.streamChat(writer, request.Context(), route, externalModel, chatRequest)
+		g.streamChat(writer, request.Context(), route, externalModel, cacheConversationID, chatRequest)
 		return
 	}
 	response, err := route.provider.Chat(request.Context(), chatRequest)
@@ -64,15 +69,18 @@ func (g *Gateway) handleChatCompletions(writer http.ResponseWriter, request *htt
 		return
 	}
 	response.Model = externalModel
+	if strings.HasPrefix(cacheConversationID, gatewayCacheConversationPrefix) || response.ConversationID == "" {
+		response.ConversationID = cacheConversationID
+	}
 	copySelectedHeaders(writer.Header(), response.Headers, route.forwardResponseHeaders)
 	if _, compatible := route.provider.(llmprovider.OpenAIWireProvider); compatible && len(response.Raw) > 0 {
-		writeRawJSON(writer, http.StatusOK, rewriteTopLevelModel(response.Raw, externalModel))
+		writeRawJSON(writer, http.StatusOK, rewriteChatResponse(response.Raw, externalModel, response.ConversationID))
 		return
 	}
 	writeJSON(writer, http.StatusOK, response)
 }
 
-func (g *Gateway) streamChat(writer http.ResponseWriter, ctx context.Context, route *route, externalModel string, request llmprovider.ChatRequest) {
+func (g *Gateway) streamChat(writer http.ResponseWriter, ctx context.Context, route *route, externalModel, cacheConversationID string, request llmprovider.ChatRequest) {
 	stream, err := route.provider.ChatStream(ctx, request)
 	if err != nil {
 		writeProviderError(writer, err)
@@ -106,9 +114,12 @@ func (g *Gateway) streamChat(writer http.ResponseWriter, ctx context.Context, ro
 			return
 		}
 		chunk.Model = externalModel
+		if strings.HasPrefix(cacheConversationID, gatewayCacheConversationPrefix) || chunk.ConversationID == "" {
+			chunk.ConversationID = cacheConversationID
+		}
 		_, _ = io.WriteString(writer, "data: ")
 		if _, compatible := route.provider.(llmprovider.OpenAIWireProvider); compatible && len(chunk.Raw) > 0 {
-			if _, err := writer.Write(rewriteTopLevelModel(chunk.Raw, externalModel)); err != nil {
+			if _, err := writer.Write(rewriteChatResponse(chunk.Raw, externalModel, chunk.ConversationID)); err != nil {
 				return
 			}
 			_, _ = io.WriteString(writer, "\n")
