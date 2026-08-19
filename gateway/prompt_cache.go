@@ -18,35 +18,36 @@ const gatewayCacheConversationPrefix = "cache_"
 // lifecycle marker; Claude keys its cache by the exact prompt prefix and uses
 // top-level cache_control to move the breakpoint automatically.
 func preparePromptCache(route *route, request llmprovider.ChatRequest) (llmprovider.ChatRequest, string, error) {
+	conversationID := request.ConversationID
+	cacheConversation := strings.HasPrefix(conversationID, gatewayCacheConversationPrefix)
+	if cacheConversation {
+		// Gateway-generated IDs are cache affinity identifiers, not upstream
+		// stateful-conversation handles. Strip them before every early return so
+		// generic and explicitly configured providers never receive them.
+		request.ConversationID = ""
+	}
+
 	mechanism := promptCacheMechanism(route)
 	if mechanism == "" {
-		// A model group may move a conversation from a stateless cached route to
-		// Codex. A Gateway cache-affinity ID is not a resumable App Server thread.
-		if isCodexRoute(route) && strings.HasPrefix(request.ConversationID, gatewayCacheConversationPrefix) {
-			request.ConversationID = ""
+		// A model group may move a conversation from a cached route to a route
+		// without automatic cache affinity. Do not treat its Gateway cache ID as
+		// a provider-native conversation or keep that obsolete lifecycle alive.
+		if cacheConversation {
 			return request, "", nil
 		}
-		return request, request.ConversationID, nil
+		return request, conversationID, nil
 	}
 	cacheConfigured := route.cacheAffinityConfigured || requestCacheAffinityConfigured(mechanism, request)
 	if mechanism != "anthropic" && cacheConfigured {
-		return request, request.ConversationID, nil
+		return request, conversationID, nil
 	}
 
-	conversationID := request.ConversationID
 	if conversationID == "" {
 		var err error
 		conversationID, err = newCacheConversationID()
 		if err != nil {
 			return llmprovider.ChatRequest{}, "", err
 		}
-	}
-
-	// Gateway-generated IDs are cache affinity identifiers, not upstream
-	// stateful-conversation handles. Do not leak them as conversation_id to
-	// OpenAI-compatible backends that may reject or interpret that extension.
-	if strings.HasPrefix(request.ConversationID, gatewayCacheConversationPrefix) {
-		request.ConversationID = ""
 	}
 
 	switch mechanism {
@@ -128,10 +129,6 @@ func headerValue(headers map[string]string, name string) string {
 		}
 	}
 	return ""
-}
-
-func isCodexRoute(route *route) bool {
-	return routeKind(route) == "codex"
 }
 
 func promptCacheMechanism(route *route) string {

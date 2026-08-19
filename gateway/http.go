@@ -69,7 +69,7 @@ func (g *Gateway) handleChatCompletions(writer http.ResponseWriter, request *htt
 		return
 	}
 	response.Model = externalModel
-	if strings.HasPrefix(cacheConversationID, gatewayCacheConversationPrefix) || response.ConversationID == "" {
+	if response.ConversationID == "" {
 		response.ConversationID = cacheConversationID
 	}
 	copySelectedHeaders(writer.Header(), response.Headers, route.forwardResponseHeaders)
@@ -100,6 +100,7 @@ func (g *Gateway) streamChat(writer http.ResponseWriter, ctx context.Context, ro
 	}
 	writer.WriteHeader(http.StatusOK)
 	encoder := json.NewEncoder(writer)
+	responseConversationID := cacheConversationID
 	for {
 		chunk, recvErr := stream.Recv()
 		if errors.Is(recvErr, io.EOF) {
@@ -114,9 +115,10 @@ func (g *Gateway) streamChat(writer http.ResponseWriter, ctx context.Context, ro
 			return
 		}
 		chunk.Model = externalModel
-		if strings.HasPrefix(cacheConversationID, gatewayCacheConversationPrefix) || chunk.ConversationID == "" {
-			chunk.ConversationID = cacheConversationID
+		if chunk.ConversationID != "" {
+			responseConversationID = chunk.ConversationID
 		}
+		chunk.ConversationID = responseConversationID
 		_, _ = io.WriteString(writer, "data: ")
 		if _, compatible := route.provider.(llmprovider.OpenAIWireProvider); compatible && len(chunk.Raw) > 0 {
 			if _, err := writer.Write(rewriteChatResponse(chunk.Raw, externalModel, chunk.ConversationID)); err != nil {

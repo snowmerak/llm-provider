@@ -419,7 +419,7 @@ func TestXAIModelsIncludeKnownReasoningCapabilities(t *testing.T) {
 }
 
 func TestProviderKindValidation(t *testing.T) {
-	for _, kind := range []string{"", "openai", "openai-compatible", "openrouter", "grok", "xai", "anthropic", "claude", "codex", "codex-app-server"} {
+	for _, kind := range []string{"", "generic", "openai", "openai-compatible", "openrouter", "grok", "xai", "anthropic", "claude", "codex", "codex-app-server"} {
 		provider := ProviderConfig{ID: "custom", Type: "openai-compatible", Kind: kind, Enabled: true, BaseURL: "https://gateway.example/v1"}
 		if err := provider.validate(); err != nil {
 			t.Fatalf("kind %q: %v", kind, err)
@@ -431,7 +431,7 @@ func TestProviderKindValidation(t *testing.T) {
 	}
 }
 
-func TestStreamingPreservesPrefixedModel(t *testing.T) {
+func TestStreamingPreservesPrefixedModelAndProviderConversationID(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Method == http.MethodGet {
 			_, _ = io.WriteString(writer, `{"object":"list","data":[{"id":"backend"}]}`)
@@ -447,6 +447,8 @@ func TestStreamingPreservesPrefixedModel(t *testing.T) {
 		writer.Header().Set("Content-Type", "text/event-stream")
 		writer.Header().Set("X-OpenRouter-Cache-Status", "MISS")
 		_, _ = io.WriteString(writer, "data: {\"id\":\"chat_1\",\"object\":\"chat.completion.chunk\",\"model\":\"backend\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"hello\"}}]}\n\n")
+		_, _ = io.WriteString(writer, "data: {\"id\":\"chat_1\",\"object\":\"chat.completion.chunk\",\"model\":\"backend\",\"conversation_id\":\"provider-stream\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" \"}}]}\n\n")
+		_, _ = io.WriteString(writer, "data: {\"id\":\"chat_1\",\"object\":\"chat.completion.chunk\",\"model\":\"backend\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"world\"}}]}\n\n")
 		_, _ = io.WriteString(writer, "data: [DONE]\n\n")
 	}))
 	defer upstream.Close()
@@ -473,15 +475,20 @@ func TestStreamingPreservesPrefixedModel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), `"model":"local/backend"`) ||
-		!strings.Contains(string(data), `"conversation_id":"`+gatewayCacheConversationPrefix) ||
+	if strings.Count(string(data), `"model":"local/backend"`) != 3 ||
+		strings.Count(string(data), `"conversation_id":"`+gatewayCacheConversationPrefix) != 1 ||
+		strings.Count(string(data), `"conversation_id":"provider-stream"`) != 2 ||
 		!strings.Contains(string(data), "data: [DONE]") {
 		t.Fatalf("stream = %s", data)
 	}
 }
 
-func TestChatPromptCacheConversationPersistsAcrossRequests(t *testing.T) {
-	cacheKeys := make(chan string, 2)
+func TestChatProviderConversationTakesPrecedenceOverCacheAffinity(t *testing.T) {
+	type upstreamRequest struct {
+		conversationID string
+		cacheKey       string
+	}
+	upstreamRequests := make(chan upstreamRequest, 2)
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/v1/models":
@@ -491,11 +498,12 @@ func TestChatPromptCacheConversationPersistsAcrossRequests(t *testing.T) {
 			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
 				t.Error(err)
 			}
-			if _, leaked := body["conversation_id"]; leaked {
+			conversationID, _ := body["conversation_id"].(string)
+			if strings.HasPrefix(conversationID, gatewayCacheConversationPrefix) {
 				t.Errorf("Gateway cache ID leaked as upstream conversation_id: %#v", body)
 			}
 			cacheKey, _ := body["prompt_cache_key"].(string)
-			cacheKeys <- cacheKey
+			upstreamRequests <- upstreamRequest{conversationID: conversationID, cacheKey: cacheKey}
 			_, _ = io.WriteString(writer, `{"id":"chat_1","model":"backend","conversation_id":"provider-generated","choices":[{"index":0,"message":{"role":"assistant","content":"ok"}}]}`)
 		default:
 			http.NotFound(writer, request)
@@ -535,16 +543,19 @@ func TestChatPromptCacheConversationPersistsAcrossRequests(t *testing.T) {
 	}
 
 	firstID := call("")
-	if !strings.HasPrefix(firstID, gatewayCacheConversationPrefix) {
+	if firstID != "provider-generated" {
 		t.Fatalf("first conversation ID = %q", firstID)
 	}
 	secondID := call(firstID)
 	if secondID != firstID {
 		t.Fatalf("second conversation ID = %q, want %q", secondID, firstID)
 	}
-	firstKey, secondKey := <-cacheKeys, <-cacheKeys
-	if firstKey != firstID || secondKey != firstID {
-		t.Fatalf("cache keys = %q, %q; want %q", firstKey, secondKey, firstID)
+	firstRequest, secondRequest := <-upstreamRequests, <-upstreamRequests
+	if firstRequest.conversationID != "" || !strings.HasPrefix(firstRequest.cacheKey, gatewayCacheConversationPrefix) {
+		t.Fatalf("first upstream request = %#v", firstRequest)
+	}
+	if secondRequest.conversationID != firstID || secondRequest.cacheKey != firstID {
+		t.Fatalf("second upstream request = %#v; want conversation/cache key %q", secondRequest, firstID)
 	}
 }
 

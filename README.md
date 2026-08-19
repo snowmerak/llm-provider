@@ -357,7 +357,7 @@ for current provider semantics.
 | Claude | Automatic top-level `cache_control`; optional explicit block breakpoints | Append-only tools, system, and message prefix | Normalized cached/write tokens |
 | Codex App Server | Provider-managed; retain `conversation_id` | Thread, history, tool calls and results | Normalized cached/write tokens |
 | Grok | Stable `X-Grok-Conv-Id` | Header, prefix, system message and tools | `cached_tokens` |
-| OpenRouter prompt cache | Stable `session_id` or `X-Session-Id` | Session key and prompt prefix | `cached_tokens` |
+| OpenRouter sticky routing | Stable `session_id` or `X-Session-Id` | Session key and prompt prefix | `cached_tokens` |
 | OpenRouter response cache | `X-OpenRouter-Cache: true` | The complete request | `MISS`, then `HIT` response header |
 
 For Chat Completions, the Gateway automatically creates a cache-affinity
@@ -390,6 +390,33 @@ when an intermediary exposes Grok through an OpenAI-compatible API:
 
 When `kind` is omitted, it is inferred from `type`; an
 `openai-compatible` URL whose hostname is `api.x.ai` is also inferred as Grok.
+
+Use `kind: "generic"` for an OpenAI-compatible endpoint that does not accept
+provider-specific prompt-cache extensions. This opts out of automatic
+`prompt_cache_key`, `session_id`, `X-Grok-Conv-Id`, and `cache_control`
+injection:
+
+```json
+{
+  "id": "strict-compatible",
+  "type": "openai-compatible",
+  "kind": "generic",
+  "base_url": "https://gateway.example/v1",
+  "enabled": true
+}
+```
+
+`generic` is valid only with `type: "openai-compatible"`. That transport may
+also declare any supported provider kind. Native transports accept only their
+matching semantics: Anthropic/Claude accepts `anthropic` or `claude`, Grok/xAI
+accepts `grok` or `xai`, Codex accepts `codex` or `codex-app-server`, and
+OpenRouter accepts `openrouter`.
+
+Automatic Claude `cache_control` for Claude models hosted through OpenRouter
+is intentionally unsupported. OpenRouter routes receive only `session_id`
+sticky routing. Use a native Anthropic route for automatic Claude prompt
+caching, or supply explicit `cache_control` when routing Claude through
+OpenRouter.
 
 Use request-scoped cache options when a provider handles mixed endpoint types.
 Provider-level `headers` and `body` values are broad defaults and may be

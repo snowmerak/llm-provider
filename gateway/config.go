@@ -164,8 +164,12 @@ func (p ProviderConfig) validate() error {
 	default:
 		return fmt.Errorf("provider %q has unsupported type %q", p.ID, p.Type)
 	}
-	if _, supported := canonicalProviderKind(p.Kind); !supported {
+	providerKind, supported := canonicalProviderKind(p.Kind)
+	if !supported {
 		return fmt.Errorf("provider %q has unsupported kind %q", p.ID, p.Kind)
+	}
+	if providerKind != "" && !providerTypeAllowsKind(p.Type, providerKind) {
+		return fmt.Errorf("provider %q type %q does not support kind %q", p.ID, p.Type, p.Kind)
 	}
 	if p.Type == "openai-compatible" && p.BaseURL == "" {
 		return fmt.Errorf("provider %q requires base_url", p.ID)
@@ -247,6 +251,8 @@ func canonicalProviderKind(kind string) (string, bool) {
 	switch kind {
 	case "":
 		return "", true
+	case "generic":
+		return "generic", true
 	case "openai", "openai-compatible":
 		return "openai", true
 	case "openrouter":
@@ -260,4 +266,15 @@ func canonicalProviderKind(kind string) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+func providerTypeAllowsKind(providerType, providerKind string) bool {
+	if providerType == "openai-compatible" {
+		return true
+	}
+	if providerKind == "generic" {
+		return false
+	}
+	typeKind, supported := canonicalProviderKind(providerType)
+	return supported && providerKind == typeKind
 }

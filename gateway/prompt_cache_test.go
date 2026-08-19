@@ -11,19 +11,19 @@ import (
 func TestPreparePromptCacheMapsConversationAffinity(t *testing.T) {
 	tests := []struct {
 		name       string
-		route      route
+		route      *route
 		extraField string
 		header     string
 	}{
-		{name: "OpenAI compatible", route: route{providerType: "openai-compatible"}, extraField: "prompt_cache_key"},
-		{name: "OpenRouter", route: route{providerType: "openrouter"}, extraField: "session_id"},
-		{name: "Grok", route: route{providerType: "grok"}, header: "X-Grok-Conv-Id"},
-		{name: "xAI compatible", route: route{providerType: "openai-compatible", modelCapabilityProfile: "xai"}, header: "X-Grok-Conv-Id"},
-		{name: "explicit Grok kind", route: route{providerType: "openai-compatible", providerKind: "grok"}, header: "X-Grok-Conv-Id"},
+		{name: "OpenAI compatible", route: &route{providerType: "openai-compatible"}, extraField: "prompt_cache_key"},
+		{name: "OpenRouter", route: &route{providerType: "openrouter"}, extraField: "session_id"},
+		{name: "Grok", route: &route{providerType: "grok"}, header: "X-Grok-Conv-Id"},
+		{name: "xAI compatible", route: &route{providerType: "openai-compatible", modelCapabilityProfile: "xai"}, header: "X-Grok-Conv-Id"},
+		{name: "explicit Grok kind", route: &route{providerType: "openai-compatible", providerKind: "grok"}, header: "X-Grok-Conv-Id"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			prepared, conversationID, err := preparePromptCache(&test.route, llmprovider.ChatRequest{})
+			prepared, conversationID, err := preparePromptCache(test.route, llmprovider.ChatRequest{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -37,7 +37,7 @@ func TestPreparePromptCacheMapsConversationAffinity(t *testing.T) {
 				t.Fatalf("headers = %#v", prepared.Headers)
 			}
 
-			prepared, secondID, err := preparePromptCache(&test.route, llmprovider.ChatRequest{ConversationID: conversationID})
+			prepared, secondID, err := preparePromptCache(test.route, llmprovider.ChatRequest{ConversationID: conversationID})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -77,20 +77,80 @@ func TestPreparePromptCachePreservesExplicitSettings(t *testing.T) {
 	}
 }
 
+func TestPreparePromptCacheStripsSyntheticConversationWithExplicitSettings(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		route *route
+		req   llmprovider.ChatRequest
+	}{
+		{
+			name:  "request setting",
+			route: &route{providerType: "openai-compatible"},
+			req: llmprovider.ChatRequest{
+				ConversationID: gatewayCacheConversationPrefix + "request",
+				Extra:          map[string]any{"prompt_cache_key": "explicit"},
+			},
+		},
+		{
+			name:  "provider setting",
+			route: &route{providerType: "openai-compatible", cacheAffinityConfigured: true},
+			req:   llmprovider.ChatRequest{ConversationID: gatewayCacheConversationPrefix + "provider"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			prepared, conversationID, err := preparePromptCache(test.route, test.req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if prepared.ConversationID != "" || conversationID != test.req.ConversationID {
+				t.Fatalf("prepared conversation ID = %q, lifecycle ID = %q", prepared.ConversationID, conversationID)
+			}
+		})
+	}
+}
+
+func TestPreparePromptCacheDropsSyntheticConversationForGenericRoute(t *testing.T) {
+	prepared, conversationID, err := preparePromptCache(
+		&route{providerType: "openai-compatible", providerKind: "generic"},
+		llmprovider.ChatRequest{ConversationID: gatewayCacheConversationPrefix + "old"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.ConversationID != "" || conversationID != "" || prepared.Extra != nil {
+		t.Fatalf("prepared = %#v, lifecycle ID = %q", prepared, conversationID)
+	}
+}
+
+func TestPreparePromptCacheOpenRouterClaudeUsesOnlySessionAffinity(t *testing.T) {
+	prepared, conversationID, err := preparePromptCache(&route{providerType: "openrouter"}, llmprovider.ChatRequest{
+		Model: "anthropic/claude-sonnet-4",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.Extra["session_id"] != conversationID {
+		t.Fatalf("session affinity = %#v, lifecycle ID = %q", prepared.Extra["session_id"], conversationID)
+	}
+	if _, configured := prepared.Extra["cache_control"]; configured {
+		t.Fatalf("OpenRouter Claude unexpectedly enabled Anthropic caching: %#v", prepared.Extra)
+	}
+}
+
 func TestPreparePromptCacheDoesNotOverrideExplicitAffinity(t *testing.T) {
 	tests := []struct {
 		name    string
-		route   route
+		route   *route
 		request llmprovider.ChatRequest
 	}{
-		{name: "request OpenAI key", route: route{providerType: "openai-compatible"}, request: llmprovider.ChatRequest{Extra: map[string]any{"prompt_cache_key": "explicit"}}},
-		{name: "request OpenRouter session", route: route{providerType: "openrouter"}, request: llmprovider.ChatRequest{Extra: map[string]any{"session_id": "explicit"}}},
-		{name: "request Grok header", route: route{providerType: "grok"}, request: llmprovider.ChatRequest{Headers: http.Header{"X-Grok-Conv-Id": []string{"explicit"}}}},
-		{name: "provider default", route: route{providerType: "openai-compatible", cacheAffinityConfigured: true}, request: llmprovider.ChatRequest{}},
+		{name: "request OpenAI key", route: &route{providerType: "openai-compatible"}, request: llmprovider.ChatRequest{Extra: map[string]any{"prompt_cache_key": "explicit"}}},
+		{name: "request OpenRouter session", route: &route{providerType: "openrouter"}, request: llmprovider.ChatRequest{Extra: map[string]any{"session_id": "explicit"}}},
+		{name: "request Grok header", route: &route{providerType: "grok"}, request: llmprovider.ChatRequest{Headers: http.Header{"X-Grok-Conv-Id": []string{"explicit"}}}},
+		{name: "provider default", route: &route{providerType: "openai-compatible", cacheAffinityConfigured: true}, request: llmprovider.ChatRequest{}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			prepared, conversationID, err := preparePromptCache(&test.route, test.request)
+			prepared, conversationID, err := preparePromptCache(test.route, test.request)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -102,12 +162,12 @@ func TestPreparePromptCacheDoesNotOverrideExplicitAffinity(t *testing.T) {
 }
 
 func TestPreparePromptCacheEnablesAnthropicAutomaticCaching(t *testing.T) {
-	for _, testRoute := range []route{
+	for _, testRoute := range []*route{
 		{providerType: "anthropic"},
 		{providerType: "claude"},
 		{providerType: "openai-compatible", providerKind: "anthropic"},
 	} {
-		prepared, conversationID, err := preparePromptCache(&testRoute, llmprovider.ChatRequest{})
+		prepared, conversationID, err := preparePromptCache(testRoute, llmprovider.ChatRequest{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -119,7 +179,7 @@ func TestPreparePromptCacheEnablesAnthropicAutomaticCaching(t *testing.T) {
 			t.Fatalf("cache control = %#v", prepared.Extra["cache_control"])
 		}
 
-		prepared, secondID, err := preparePromptCache(&testRoute, llmprovider.ChatRequest{ConversationID: conversationID})
+		prepared, secondID, err := preparePromptCache(testRoute, llmprovider.ChatRequest{ConversationID: conversationID})
 		if err != nil {
 			t.Fatal(err)
 		}
