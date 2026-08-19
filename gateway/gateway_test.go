@@ -548,6 +548,76 @@ func TestChatPromptCacheConversationPersistsAcrossRequests(t *testing.T) {
 	}
 }
 
+func TestAnthropicAutomaticCacheConversationPersistsAcrossRequests(t *testing.T) {
+	cacheControls := make(chan map[string]any, 2)
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/v1/models":
+			_, _ = io.WriteString(writer, `{"data":[{"id":"backend","type":"model","created_at":"2026-01-01T00:00:00Z"}],"has_more":false}`)
+		case "/v1/messages":
+			var body map[string]any
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				t.Error(err)
+			}
+			if _, leaked := body["conversation_id"]; leaked {
+				t.Errorf("Gateway lifecycle ID leaked to Anthropic: %#v", body)
+			}
+			cacheControl, _ := body["cache_control"].(map[string]any)
+			cacheControls <- cacheControl
+			_, _ = io.WriteString(writer, `{"id":"msg_1","type":"message","role":"assistant","model":"backend","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":1,"cache_creation_input_tokens":1200,"cache_read_input_tokens":0}}`)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer upstream.Close()
+
+	gateway, err := New(Config{Providers: []ProviderConfig{{
+		ID: "claude", Type: "anthropic", Enabled: true, BaseURL: upstream.URL + "/v1", APIKey: "secret",
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gateway.Close()
+	server := httptest.NewServer(gateway.Handler())
+	defer server.Close()
+
+	call := func(conversationID string) string {
+		body := map[string]any{
+			"model": "claude/backend", "messages": []any{map[string]any{"role": "user", "content": "hello"}},
+		}
+		if conversationID != "" {
+			body["conversation_id"] = conversationID
+		}
+		encoded, _ := json.Marshal(body)
+		response, requestErr := http.Post(server.URL+"/v1/chat/completions", "application/json", bytes.NewReader(encoded))
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		defer response.Body.Close()
+		var completion struct {
+			ConversationID string `json:"conversation_id"`
+		}
+		if decodeErr := json.NewDecoder(response.Body).Decode(&completion); decodeErr != nil {
+			t.Fatal(decodeErr)
+		}
+		return completion.ConversationID
+	}
+
+	firstID := call("")
+	if !strings.HasPrefix(firstID, gatewayCacheConversationPrefix) {
+		t.Fatalf("first conversation ID = %q", firstID)
+	}
+	if secondID := call(firstID); secondID != firstID {
+		t.Fatalf("second conversation ID = %q, want %q", secondID, firstID)
+	}
+	for index := 0; index < 2; index++ {
+		cacheControl := <-cacheControls
+		if cacheControl["type"] != "ephemeral" {
+			t.Fatalf("request %d cache control = %#v", index+1, cacheControl)
+		}
+	}
+}
+
 func TestLoadConfigExpandsEnvironment(t *testing.T) {
 	t.Setenv("TEST_GATEWAY_API_KEY", "expanded-secret")
 	t.Setenv("TEST_CACHE_KEY", "tenant:cache-v1")

@@ -13,6 +13,9 @@ import (
 // than provider-specific cache fields supplied by the caller. It remains an
 // opt-in external regression because each subtest makes paid provider calls.
 func TestAutomaticGatewayPromptCacheHitRate(t *testing.T) {
+	t.Run("Claude", func(t *testing.T) {
+		testAutomaticGatewayPromptCacheHitRate(t, "CLAUDE", cacheProvider("CLAUDE", "claude"), "CLAUDE_CACHE_MODEL", "claude-sonnet-5")
+	})
 	t.Run("OpenAICompatible", func(t *testing.T) {
 		testAutomaticGatewayPromptCacheHitRate(t, "OPENAI_COMPATIBLE", cacheProvider("OPENAI_COMPATIBLE", "macmini"), "OPENAI_COMPAT_CACHE_MODEL", "gpt-5.6-luna")
 	})

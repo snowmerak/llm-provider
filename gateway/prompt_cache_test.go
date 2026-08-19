@@ -101,8 +101,65 @@ func TestPreparePromptCacheDoesNotOverrideExplicitAffinity(t *testing.T) {
 	}
 }
 
-func TestPreparePromptCacheLeavesClaudeAndCodexAlone(t *testing.T) {
-	for _, providerType := range []string{"anthropic", "claude", "codex", "codex-app-server"} {
+func TestPreparePromptCacheEnablesAnthropicAutomaticCaching(t *testing.T) {
+	for _, testRoute := range []route{
+		{providerType: "anthropic"},
+		{providerType: "claude"},
+		{providerType: "openai-compatible", providerKind: "anthropic"},
+	} {
+		prepared, conversationID, err := preparePromptCache(&testRoute, llmprovider.ChatRequest{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasPrefix(conversationID, gatewayCacheConversationPrefix) {
+			t.Fatalf("conversation ID = %q", conversationID)
+		}
+		cacheControl, ok := prepared.Extra["cache_control"].(map[string]any)
+		if !ok || cacheControl["type"] != "ephemeral" {
+			t.Fatalf("cache control = %#v", prepared.Extra["cache_control"])
+		}
+
+		prepared, secondID, err := preparePromptCache(&testRoute, llmprovider.ChatRequest{ConversationID: conversationID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if secondID != conversationID || prepared.ConversationID != "" {
+			t.Fatalf("second request ID = %q, upstream conversation ID = %q", secondID, prepared.ConversationID)
+		}
+		cacheControl, ok = prepared.Extra["cache_control"].(map[string]any)
+		if !ok || cacheControl["type"] != "ephemeral" {
+			t.Fatalf("second cache control = %#v", prepared.Extra["cache_control"])
+		}
+	}
+}
+
+func TestPreparePromptCachePreservesExplicitAnthropicCacheControl(t *testing.T) {
+	explicit := map[string]any{"type": "ephemeral", "ttl": "1h"}
+	prepared, conversationID, err := preparePromptCache(&route{providerType: "anthropic"}, llmprovider.ChatRequest{
+		Extra: map[string]any{"cache_control": explicit},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cacheControl, ok := prepared.Extra["cache_control"].(map[string]any)
+	if !strings.HasPrefix(conversationID, gatewayCacheConversationPrefix) || !ok ||
+		cacheControl["type"] != "ephemeral" || cacheControl["ttl"] != "1h" {
+		t.Fatalf("prepared = %#v, conversation ID = %q", prepared, conversationID)
+	}
+
+	prepared, conversationID, err = preparePromptCache(&route{
+		providerType: "anthropic", cacheAffinityConfigured: true,
+	}, llmprovider.ChatRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(conversationID, gatewayCacheConversationPrefix) || prepared.Extra != nil {
+		t.Fatalf("provider default was overridden: %#v, conversation ID = %q", prepared, conversationID)
+	}
+}
+
+func TestPreparePromptCacheLeavesCodexAlone(t *testing.T) {
+	for _, providerType := range []string{"codex", "codex-app-server"} {
 		request := llmprovider.ChatRequest{ConversationID: "existing"}
 		prepared, conversationID, err := preparePromptCache(&route{providerType: providerType}, request)
 		if err != nil {

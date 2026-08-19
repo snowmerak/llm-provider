@@ -12,10 +12,11 @@ import (
 
 const gatewayCacheConversationPrefix = "cache_"
 
-// preparePromptCache gives stateless HTTP providers a stable cache-affinity
-// value. Codex owns ConversationID as an App Server thread ID, while native
-// Anthropic caching requires explicit cache_control breakpoints and is left to
-// the caller.
+// preparePromptCache gives HTTP providers the cache metadata appropriate to
+// their backend. Codex owns ConversationID as an App Server thread ID. For
+// Anthropic, the Gateway-generated ConversationID is only a client-side
+// lifecycle marker; Claude keys its cache by the exact prompt prefix and uses
+// top-level cache_control to move the breakpoint automatically.
 func preparePromptCache(route *route, request llmprovider.ChatRequest) (llmprovider.ChatRequest, string, error) {
 	mechanism := promptCacheMechanism(route)
 	if mechanism == "" {
@@ -27,7 +28,8 @@ func preparePromptCache(route *route, request llmprovider.ChatRequest) (llmprovi
 		}
 		return request, request.ConversationID, nil
 	}
-	if route.cacheAffinityConfigured || requestCacheAffinityConfigured(mechanism, request) {
+	cacheConfigured := route.cacheAffinityConfigured || requestCacheAffinityConfigured(mechanism, request)
+	if mechanism != "anthropic" && cacheConfigured {
 		return request, request.ConversationID, nil
 	}
 
@@ -66,6 +68,14 @@ func preparePromptCache(route *route, request llmprovider.ChatRequest) (llmprovi
 		if request.Headers.Get("X-Grok-Conv-Id") == "" {
 			request.Headers.Set("X-Grok-Conv-Id", conversationID)
 		}
+	case "anthropic":
+		// The native Messages API's automatic cache breakpoint advances to the
+		// last cacheable block. Preserve request- or provider-level controls so
+		// callers can choose a 1h TTL or explicit block-level breakpoints.
+		if !cacheConfigured {
+			request.Extra = cloneAnyMap(request.Extra)
+			request.Extra["cache_control"] = map[string]any{"type": "ephemeral"}
+		}
 	}
 	return request, conversationID, nil
 }
@@ -83,6 +93,9 @@ func providerCacheAffinityConfigured(config ProviderConfig, providerKind string)
 		return headerValue(config.Headers, "X-Session-Id") != ""
 	case "grok":
 		return headerValue(config.Headers, "X-Grok-Conv-Id") != ""
+	case "anthropic":
+		_, configured := config.Body["cache_control"]
+		return configured
 	default:
 		return false
 	}
@@ -100,6 +113,9 @@ func requestCacheAffinityConfigured(mechanism string, request llmprovider.ChatRe
 		return request.Headers.Get("X-Session-Id") != ""
 	case "grok":
 		return request.Headers.Get("X-Grok-Conv-Id") != ""
+	case "anthropic":
+		_, configured := request.Extra["cache_control"]
+		return configured
 	default:
 		return false
 	}
@@ -126,6 +142,8 @@ func promptCacheMechanism(route *route) string {
 		return "openrouter"
 	case "openai":
 		return "openai"
+	case "anthropic":
+		return "anthropic"
 	default:
 		return ""
 	}

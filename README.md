@@ -354,7 +354,7 @@ for current provider semantics.
 | Provider | Reuse mechanism | Keep stable | Hit signal |
 |---|---|---|---|
 | OpenAI-compatible GPT-5.6+ | `prompt_cache_key`, `prompt_cache_options`, `prompt_cache_breakpoint` | Prefix, cache key, tools and schema order | `cached_tokens`, `cache_write_tokens` |
-| Claude | `cache_control` on a stable content block | Marked block and preceding content | Normalized cached/write tokens |
+| Claude | Automatic top-level `cache_control`; optional explicit block breakpoints | Append-only tools, system, and message prefix | Normalized cached/write tokens |
 | Codex App Server | Provider-managed; retain `conversation_id` | Thread, history, tool calls and results | Normalized cached/write tokens |
 | Grok | Stable `X-Grok-Conv-Id` | Header, prefix, system message and tools | `cached_tokens` |
 | OpenRouter prompt cache | Stable `session_id` or `X-Session-Id` | Session key and prompt prefix | `cached_tokens` |
@@ -363,15 +363,16 @@ for current provider semantics.
 For Chat Completions, the Gateway automatically creates a cache-affinity
 `conversation_id` when the request does not already select a cache key. It
 maps that value to `prompt_cache_key` for OpenAI-compatible providers,
-`session_id` for OpenRouter, and `X-Grok-Conv-Id` for Grok/xAI, then returns the
-ID in regular responses and stream chunks so clients can reuse it on later
-turns. Request-scoped values and provider-level body/header defaults take
-precedence. Gateway-generated IDs are never forwarded as an upstream stateful
-`conversation_id`.
-
-Native Anthropic routes are deliberately excluded because useful Claude cache
-boundaries require explicit `cache_control` placement. Codex continues to own
-`conversation_id` as its App Server thread ID.
+`session_id` for OpenRouter, and `X-Grok-Conv-Id` for Grok/xAI. For Anthropic,
+it adds top-level `cache_control: {"type":"ephemeral"}`, which asks Claude to
+move the cache breakpoint to the last cacheable block as the conversation
+grows. The ID is returned in regular responses and stream chunks so clients
+can retain one conversation lifecycle and start a new one after compaction.
+Claude does not use this ID as a cache key: cache hits still require an exact
+prompt prefix. Request-scoped values and provider-level body/header defaults
+take precedence. Gateway-generated IDs are never forwarded as an upstream
+stateful `conversation_id`. Codex continues to own `conversation_id` as its App
+Server thread ID.
 
 `type` selects the transport implementation, while optional `kind` selects the
 backend semantics used for cache and known model capabilities. This matters
@@ -736,9 +737,12 @@ SSE streaming is supported.
 ```
 
 Claude Sonnet 5 uses adaptive thinking by default and rejects non-default
-`temperature` and `top_p` values. For explicit prompt caching, add
-`cache_control: {"type":"ephemeral","ttl":"5m"}` to a system or message
-content block.
+`temperature` and `top_p` values. The Gateway enables automatic prompt caching
+with a top-level `cache_control` field. Claude advances the breakpoint as an
+append-only conversation grows; the default TTL is 5 minutes. Set a request or
+provider body value such as `{"type":"ephemeral","ttl":"1h"}` to choose the
+one-hour TTL. Explicit `cache_control` markers on system or message content
+blocks remain supported for additional stable-prefix breakpoints.
 
 ## Verification
 
@@ -750,8 +754,9 @@ go test ./...
 
 ### Cache regression tests
 
-External cache hit-rate tests live in `tests/cache_hitrate_test.go`. They are
-skipped by the default `go test ./...` run because they can incur API costs. Use
+External cache hit-rate tests live in `tests/cache_hitrate_test.go` and
+`tests/automatic_cache_hitrate_test.go`. They are skipped by the default
+`go test ./...` run because they can incur API costs. Use
 [Task](https://taskfile.dev/) to run one provider or the complete suite
 explicitly:
 
