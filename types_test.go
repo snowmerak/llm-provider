@@ -5,6 +5,25 @@ import (
 	"testing"
 )
 
+func TestChatChunkPreservesChoicePhaseOnWire(t *testing.T) {
+	chunk := ChatChunk{Choices: []Choice{{
+		Index: 0, Phase: "commentary",
+		Delta: &Message{Role: RoleAssistant, Content: "working"},
+	}}}
+	data, err := json.Marshal(chunk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded ChatChunk
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Choices) != 1 || decoded.Choices[0].Phase != "commentary" ||
+		decoded.Choices[0].Delta == nil || decoded.Choices[0].Delta.Content != "working" {
+		t.Fatalf("chunk = %#v, wire = %s", decoded, data)
+	}
+}
+
 func TestModelNormalizesContextLengthAliases(t *testing.T) {
 	tests := []struct {
 		name string

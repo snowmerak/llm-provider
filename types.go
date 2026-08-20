@@ -214,7 +214,9 @@ type Choice struct {
 	Delta        *Message `json:"delta,omitempty"`
 	// Phase is provider metadata. Codex uses "commentary" and
 	// "final_answer"; OpenAI-compatible responses normally leave it empty.
-	Phase string `json:"-"`
+	// It is serialized on streamed chunks so an HTTP gateway does not erase
+	// the distinction before the downstream client consumes the stream.
+	Phase string `json:"phase,omitempty"`
 }
 
 type Usage struct {
