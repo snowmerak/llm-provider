@@ -591,6 +591,148 @@ func TestChatResumesDelegatedToolOnSameTurn(t *testing.T) {
 	}
 }
 
+func TestChatSurfacesLateDelegatedToolOnNextRound(t *testing.T) {
+	fake := newFakeTransport()
+	provider := New(func(config *config) {
+		config.transportFactoryForTest = func() (transport, error) { return fake, nil }
+	})
+	defer provider.Close()
+	releaseLateTool := make(chan struct{})
+	serverErr := make(chan error, 1)
+	go func() { serverErr <- serveLateDelegatedTools(fake, releaseLateTool) }()
+
+	parallel := false
+	request := llmprovider.ChatRequest{
+		Model:             "test-model",
+		Messages:          []llmprovider.Message{{Role: llmprovider.RoleUser, Content: "Use both tools."}},
+		ParallelToolCalls: &parallel,
+		Tools: []llmprovider.Tool{{
+			Type: llmprovider.ToolTypeFunction,
+			Function: llmprovider.FunctionDefinition{
+				Name: "lookup_value", Parameters: map[string]any{"type": "object"},
+			},
+		}},
+	}
+	first, err := provider.Chat(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls := first.Choices[0].Message.ToolCalls; len(calls) != 1 || calls[0].ID != "call_late_a" {
+		t.Fatalf("first response = %#v", first)
+	}
+
+	close(releaseLateTool)
+	waitForDelegatedToolCount(t, provider, "thread_late", 2)
+	request.ConversationID = first.ConversationID
+	request.Messages = append(request.Messages, first.Choices[0].Message, llmprovider.Message{
+		Role: llmprovider.RoleTool, ToolCallID: "call_late_a", Content: "A",
+	})
+	second, err := provider.Chat(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls := second.Choices[0].Message.ToolCalls; len(calls) != 1 || calls[0].ID != "call_late_b" || calls[0].Index != 0 {
+		t.Fatalf("second response = %#v", second)
+	}
+
+	request.Messages = append(request.Messages, second.Choices[0].Message, llmprovider.Message{
+		Role: llmprovider.RoleTool, ToolCallID: "call_late_b", Content: "B",
+	})
+	final, err := provider.Chat(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final.ConversationID != first.ConversationID || final.ID != first.ID ||
+		final.Choices[0].Message.Content != "A and B received" {
+		t.Fatalf("final response = %#v", final)
+	}
+	if err := <-serverErr; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func waitForDelegatedToolCount(t *testing.T, provider *Provider, threadID string, count int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		provider.mu.Lock()
+		state := provider.active[threadID]
+		provider.mu.Unlock()
+		if state != nil && len(state.delegatedTools()) == count {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("thread %s did not reach %d delegated tools", threadID, count)
+}
+
+func serveLateDelegatedTools(transport *fakeTransport, releaseLateTool <-chan struct{}) error {
+	for {
+		select {
+		case data := <-transport.writes:
+			var request struct {
+				ID     int64          `json:"id"`
+				Method string         `json:"method"`
+				Params map[string]any `json:"params"`
+				Result map[string]any `json:"result"`
+			}
+			if err := json.Unmarshal(data, &request); err != nil {
+				return err
+			}
+			switch request.Method {
+			case "initialize":
+				transport.send(map[string]any{"id": request.ID, "result": map[string]any{}})
+			case "initialized":
+			case "thread/start":
+				transport.send(map[string]any{"id": request.ID, "result": map[string]any{
+					"thread": map[string]any{"id": "thread_late"},
+				}})
+			case "turn/start":
+				transport.send(map[string]any{"id": request.ID, "result": map[string]any{
+					"turn": map[string]any{"id": "turn_late", "status": "inProgress"},
+				}})
+				transport.send(map[string]any{"id": 911, "method": "item/tool/call", "params": map[string]any{
+					"threadId": "thread_late", "turnId": "turn_late", "callId": "call_late_a",
+					"tool": "lookup_value", "arguments": map[string]any{"key": "a"},
+				}})
+				go func() {
+					<-releaseLateTool
+					transport.send(map[string]any{"id": 912, "method": "item/tool/call", "params": map[string]any{
+						"threadId": "thread_late", "turnId": "turn_late", "callId": "call_late_b",
+						"tool": "lookup_value", "arguments": map[string]any{"key": "b"},
+					}})
+				}()
+			case "":
+				if request.Result["success"] != true {
+					return fmt.Errorf("tool callback response = %#v", request)
+				}
+				switch request.ID {
+				case 911:
+				case 912:
+					transport.send(map[string]any{"method": "item/started", "params": map[string]any{
+						"threadId": "thread_late", "turnId": "turn_late",
+						"item": map[string]any{"id": "answer_late", "type": "agentMessage", "phase": "final_answer"},
+					}})
+					transport.send(map[string]any{"method": "item/agentMessage/delta", "params": map[string]any{
+						"threadId": "thread_late", "turnId": "turn_late", "itemId": "answer_late",
+						"delta": "A and B received",
+					}})
+					transport.send(map[string]any{"method": "turn/completed", "params": map[string]any{
+						"threadId": "thread_late", "turn": map[string]any{"id": "turn_late", "status": "completed"},
+					}})
+					return nil
+				default:
+					return fmt.Errorf("unexpected callback response id %d", request.ID)
+				}
+			default:
+				return errors.New("unexpected method: " + request.Method)
+			}
+		case <-time.After(5 * time.Second):
+			return errors.New("timed out waiting for late delegated tool flow")
+		}
+	}
+}
+
 func serveSameTurnDelegatedTool(transport *fakeTransport) error {
 	threadStarts := 0
 	for {

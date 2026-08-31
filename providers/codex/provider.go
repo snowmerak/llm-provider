@@ -298,7 +298,10 @@ func (p *Provider) ChatStream(ctx context.Context, request llmprovider.ChatReque
 		}
 	}
 
-	state := newTurnState(ctx, p, threadID, firstNonEmpty(request.Model, p.config.model), request.ToolHandler)
+	parallelTools := request.ParallelToolCalls == nil || *request.ParallelToolCalls
+	state := newTurnState(
+		ctx, p, threadID, firstNonEmpty(request.Model, p.config.model), request.ToolHandler, parallelTools,
+	)
 	p.mu.Lock()
 	if previous := p.active[threadID]; previous != nil {
 		p.mu.Unlock()
@@ -354,7 +357,7 @@ func (p *Provider) resumeDelegatedTurn(ctx context.Context, request llmprovider.
 	if state == nil || !state.isAwaitingTools() {
 		return nil, false, nil
 	}
-	pending, results, err := state.resumeWithToolResults(request.Messages)
+	pending, results, err := state.matchDelegatedToolResults(request.Messages)
 	if err != nil {
 		return nil, true, err
 	}
@@ -365,9 +368,10 @@ func (p *Provider) resumeDelegatedTurn(ctx context.Context, request llmprovider.
 				"type": "inputText", "text": results[index].TextContent(),
 			}},
 		}, nil); err != nil {
-			state.finish(err)
-			p.removeTurn(state)
 			return nil, true, err
+		}
+		if !state.acknowledgeDelegatedTool(item) {
+			return nil, true, fmt.Errorf("codex: delegated tool call %q is no longer pending", item.call.ID)
 		}
 	}
 	return &codexStream{state: state, ctx: ctx}, true, nil
@@ -771,7 +775,13 @@ func (p *Provider) readLoop() {
 			return
 		}
 		if len(message.ID) > 0 && message.Method != "" {
-			go p.handleServerRequest(message)
+			if message.Method == "item/tool/call" {
+				// Register dynamic callbacks in wire order. Executing a configured
+				// in-process handler is still dispatched asynchronously below.
+				p.handleServerRequest(message)
+			} else {
+				go p.handleServerRequest(message)
+			}
 			continue
 		}
 		if len(message.ID) > 0 {
@@ -843,14 +853,19 @@ func (p *Provider) handleDynamicToolCall(message wireMessage) {
 		}
 	}
 	if state != nil && state.toolHandler != nil {
-		value, err := state.toolHandler(state.ctx, call)
-		if err != nil {
-			result = llmprovider.ToolResult{IsError: true, Content: err.Error()}
-		} else {
-			result = value
-		}
+		go func() {
+			value, err := state.toolHandler(state.ctx, call)
+			if err != nil {
+				value = llmprovider.ToolResult{IsError: true, Content: err.Error()}
+			}
+			_ = p.respondToServer(message.ID, map[string]any{
+				"success":      !value.IsError,
+				"contentItems": []map[string]any{{"type": "inputText", "text": value.Content}},
+			}, nil)
+		}()
+		return
 	}
-	p.respondToServer(message.ID, map[string]any{
+	_ = p.respondToServer(message.ID, map[string]any{
 		"success":      !result.IsError,
 		"contentItems": []map[string]any{{"type": "inputText", "text": result.Content}},
 	}, nil)

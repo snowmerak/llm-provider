@@ -7,16 +7,15 @@ import (
 	"fmt"
 	"io"
 	"sync"
-	"time"
 
 	llmprovider "github.com/snowmerak/llm-provider"
 )
 
-const delegatedToolSettleDelay = 15 * time.Millisecond
-
 type pendingDelegatedTool struct {
 	call      llmprovider.ToolCall
 	requestID json.RawMessage
+	queued    bool
+	delivered bool
 }
 
 type turnState struct {
@@ -26,21 +25,22 @@ type turnState struct {
 	model       string
 	toolHandler llmprovider.ToolHandler
 
-	mu               sync.Mutex
-	turnID           string
-	queue            []*llmprovider.ChatChunk
-	done             bool
-	err              error
-	errDelivered     bool
-	wake             chan struct{}
-	closed           bool
-	usage            llmprovider.Usage
-	pendingError     error
-	deltaItems       map[string]bool
-	itemPhases       map[string]string
-	delegated        []pendingDelegatedTool
-	delegatedVersion uint64
-	awaitingTools    bool
+	mu            sync.Mutex
+	turnID        string
+	queue         []*llmprovider.ChatChunk
+	done          bool
+	err           error
+	errDelivered  bool
+	wake          chan struct{}
+	closed        bool
+	usage         llmprovider.Usage
+	pendingError  error
+	deltaItems    map[string]bool
+	itemPhases    map[string]string
+	delegated     []pendingDelegatedTool
+	awaitingTools bool
+	parallelTools bool
+	nextToolIndex int
 }
 
 // addDelegatedTool parks an App Server callback so an OpenAI-compatible
@@ -51,28 +51,56 @@ func (s *turnState) addDelegatedTool(call llmprovider.ToolCall, requestID json.R
 		s.mu.Unlock()
 		return false
 	}
-	call.Index = len(s.delegated)
+	if s.parallelTools {
+		call.Index = s.nextToolIndex
+		s.nextToolIndex++
+	} else {
+		call.Index = 0
+	}
 	s.delegated = append(s.delegated, pendingDelegatedTool{
 		call: call, requestID: append(json.RawMessage(nil), requestID...),
 	})
-	s.delegatedVersion++
 	s.awaitingTools = true
-	usage := s.usage
-	chunk := &llmprovider.ChatChunk{
-		ID: s.turnID, Object: "chat.completion.chunk", Model: s.model,
-		ConversationID: s.threadID, Usage: &usage,
-		Choices: []llmprovider.Choice{{
-			Index: 0,
-			Delta: &llmprovider.Message{
-				Role: llmprovider.RoleAssistant, ToolCalls: []llmprovider.ToolCall{call},
-			},
-			FinishReason: "tool_calls",
-		}},
-	}
-	s.queue = append(s.queue, chunk)
+	s.queueDelegatedToolsLocked()
 	s.mu.Unlock()
 	s.signal()
 	return true
+}
+
+// queueDelegatedToolsLocked exposes either every pending callback or one at a
+// time, depending on the OpenAI-compatible parallel_tool_calls setting.
+func (s *turnState) queueDelegatedToolsLocked() {
+	if !s.parallelTools {
+		for _, pending := range s.delegated {
+			if pending.queued || pending.delivered {
+				return
+			}
+		}
+	}
+
+	for index := range s.delegated {
+		pending := &s.delegated[index]
+		if pending.queued || pending.delivered {
+			continue
+		}
+		call := pending.call
+		pending.queued = true
+		usage := s.usage
+		s.queue = append(s.queue, &llmprovider.ChatChunk{
+			ID: s.turnID, Object: "chat.completion.chunk", Model: s.model,
+			ConversationID: s.threadID, Usage: &usage,
+			Choices: []llmprovider.Choice{{
+				Index: 0,
+				Delta: &llmprovider.Message{
+					Role: llmprovider.RoleAssistant, ToolCalls: []llmprovider.ToolCall{call},
+				},
+				FinishReason: "tool_calls",
+			}},
+		})
+		if !s.parallelTools {
+			return
+		}
+	}
 }
 
 func (s *turnState) delegatedTools() []llmprovider.ToolCall {
@@ -91,7 +119,10 @@ func (s *turnState) isAwaitingTools() bool {
 	return s.awaitingTools && !s.done
 }
 
-func (s *turnState) resumeWithToolResults(messages []llmprovider.Message) ([]pendingDelegatedTool, []llmprovider.Message, error) {
+// matchDelegatedToolResults validates results for callbacks that have actually
+// been delivered to the caller. It deliberately does not mutate state: each
+// callback is acknowledged only after its JSON-RPC response is written.
+func (s *turnState) matchDelegatedToolResults(messages []llmprovider.Message) ([]pendingDelegatedTool, []llmprovider.Message, error) {
 	results := make(map[string]llmprovider.Message)
 	for _, message := range messages {
 		if message.Role == llmprovider.RoleTool && message.ToolCallID != "" {
@@ -104,24 +135,54 @@ func (s *turnState) resumeWithToolResults(messages []llmprovider.Message) ([]pen
 	if s.done || !s.awaitingTools || len(s.delegated) == 0 {
 		return nil, nil, errors.New("codex: thread is not waiting for delegated tool results")
 	}
-	pending := append([]pendingDelegatedTool(nil), s.delegated...)
-	orderedResults := make([]llmprovider.Message, 0, len(pending))
-	for _, item := range pending {
+	pending := make([]pendingDelegatedTool, 0, len(s.delegated))
+	orderedResults := make([]llmprovider.Message, 0, len(s.delegated))
+	for _, item := range s.delegated {
+		if !item.delivered {
+			continue
+		}
 		result, ok := results[item.call.ID]
 		if !ok {
 			return nil, nil, fmt.Errorf("codex: missing result for delegated tool call %q", item.call.ID)
 		}
+		pending = append(pending, item)
 		orderedResults = append(orderedResults, result)
 	}
-	s.delegated = nil
-	s.awaitingTools = false
 	return pending, orderedResults, nil
 }
 
-func newTurnState(ctx context.Context, provider *Provider, threadID, model string, toolHandler llmprovider.ToolHandler) *turnState {
+func (s *turnState) acknowledgeDelegatedTool(acknowledged pendingDelegatedTool) bool {
+	s.mu.Lock()
+	for index, pending := range s.delegated {
+		if pending.call.ID != acknowledged.call.ID || string(pending.requestID) != string(acknowledged.requestID) {
+			continue
+		}
+		s.delegated = append(s.delegated[:index], s.delegated[index+1:]...)
+		s.awaitingTools = len(s.delegated) > 0
+		if s.awaitingTools {
+			s.queueDelegatedToolsLocked()
+		} else {
+			s.nextToolIndex = 0
+		}
+		s.mu.Unlock()
+		s.signal()
+		return true
+	}
+	s.mu.Unlock()
+	return false
+}
+
+func newTurnState(
+	ctx context.Context,
+	provider *Provider,
+	threadID, model string,
+	toolHandler llmprovider.ToolHandler,
+	parallelTools bool,
+) *turnState {
 	return &turnState{
 		ctx: ctx, provider: provider, threadID: threadID, model: model, toolHandler: toolHandler,
 		wake: make(chan struct{}, 1), deltaItems: make(map[string]bool), itemPhases: make(map[string]string),
+		parallelTools: parallelTools,
 	}
 }
 
@@ -177,6 +238,7 @@ func (s *turnState) recv(ctx context.Context) (*llmprovider.ChatChunk, error) {
 		if len(s.queue) > 0 {
 			chunk := s.queue[0]
 			s.queue = s.queue[1:]
+			s.markDelegatedToolDeliveredLocked(chunk)
 			s.mu.Unlock()
 			return chunk, nil
 		}
@@ -191,29 +253,8 @@ func (s *turnState) recv(ctx context.Context) (*llmprovider.ChatChunk, error) {
 			return nil, io.EOF
 		}
 		if s.awaitingTools {
-			version := s.delegatedVersion
 			s.mu.Unlock()
-			timer := time.NewTimer(delegatedToolSettleDelay)
-			select {
-			case <-ctx.Done():
-				if !timer.Stop() {
-					<-timer.C
-				}
-				return nil, ctx.Err()
-			case <-s.wake:
-				if !timer.Stop() {
-					<-timer.C
-				}
-				continue
-			case <-timer.C:
-				s.mu.Lock()
-				settled := s.awaitingTools && version == s.delegatedVersion && len(s.queue) == 0
-				s.mu.Unlock()
-				if settled {
-					return nil, io.EOF
-				}
-				continue
-			}
+			return nil, io.EOF
 		}
 		s.mu.Unlock()
 
@@ -221,6 +262,21 @@ func (s *turnState) recv(ctx context.Context) (*llmprovider.ChatChunk, error) {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-s.wake:
+		}
+	}
+}
+
+func (s *turnState) markDelegatedToolDeliveredLocked(chunk *llmprovider.ChatChunk) {
+	if len(chunk.Choices) == 0 || chunk.Choices[0].Delta == nil {
+		return
+	}
+	for _, call := range chunk.Choices[0].Delta.ToolCalls {
+		for index := range s.delegated {
+			if s.delegated[index].call.ID == call.ID {
+				s.delegated[index].queued = false
+				s.delegated[index].delivered = true
+				break
+			}
 		}
 	}
 }
