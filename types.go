@@ -1,6 +1,7 @@
 package llmprovider
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -268,6 +269,37 @@ type ModelMetadata struct {
 // ModelCapabilities describes optional controls advertised for a model.
 type ModelCapabilities struct {
 	Reasoning *ReasoningCapabilities `json:"reasoning,omitempty"`
+}
+
+// UnmarshalJSON accepts both q's structured capability metadata and the flat
+// capability-name lists exposed by some OpenAI-compatible local servers.
+func (c *ModelCapabilities) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) > 0 && trimmed[0] == '[' {
+		var advertised []string
+		if err := json.Unmarshal(trimmed, &advertised); err != nil {
+			return err
+		}
+		*c = ModelCapabilities{}
+		for _, name := range advertised {
+			if strings.EqualFold(strings.TrimSpace(name), "reasoning") {
+				c.Reasoning = &ReasoningCapabilities{
+					Supported: true,
+					Control:   ReasoningControlFixed,
+				}
+				break
+			}
+		}
+		return nil
+	}
+
+	type capabilities ModelCapabilities
+	var decoded capabilities
+	if err := json.Unmarshal(trimmed, &decoded); err != nil {
+		return err
+	}
+	*c = ModelCapabilities(decoded)
+	return nil
 }
 
 type ReasoningControl string

@@ -12,6 +12,40 @@ import (
 	llmprovider "github.com/snowmerak/llm-provider"
 )
 
+func TestListModelsAcceptsFlatCapabilityNames(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Path; got != "/v1/models" {
+			t.Errorf("path = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"object":"list","data":[{
+			"id":"Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit",
+			"object":"model",
+			"owned_by":"mlx-serve",
+			"context_length":262144,
+			"capabilities":["chat","tool_use","streaming","vision","reasoning","json_schema"],
+			"meta":{"architecture":"qwen4_exp"}
+		}]}`)
+	}))
+	defer server.Close()
+
+	models, err := New(WithBaseURL(server.URL + "/v1")).ListModels(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(models) != 1 || models[0].ID != "Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit" ||
+		models[0].ContextLength != 262144 {
+		t.Fatalf("models = %#v", models)
+	}
+	if models[0].Capabilities == nil {
+		t.Fatal("model capabilities are nil")
+	}
+	reasoning := models[0].Capabilities.Reasoning
+	if reasoning == nil || !reasoning.Supported || reasoning.Control != llmprovider.ReasoningControlFixed {
+		t.Fatalf("reasoning = %#v", reasoning)
+	}
+}
+
 func TestChatWithTools(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.URL.Path; got != "/v1/chat/completions" {

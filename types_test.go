@@ -101,6 +101,26 @@ func TestModelPreservesReasoningEffortMetadata(t *testing.T) {
 	}
 }
 
+func TestModelNormalizesFlatCapabilityNames(t *testing.T) {
+	var model Model
+	if err := json.Unmarshal([]byte(`{
+		"id":"Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit",
+		"context_length":262144,
+		"capabilities":["chat","tool_use","streaming","vision","reasoning","json_schema"],
+		"meta":{"architecture":"qwen4_exp"}
+	}`), &model); err != nil {
+		t.Fatal(err)
+	}
+	if model.ID != "Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit" || model.ContextLength != 262144 {
+		t.Fatalf("model = %#v", model)
+	}
+	if model.Capabilities == nil || model.Capabilities.Reasoning == nil ||
+		!model.Capabilities.Reasoning.Supported ||
+		model.Capabilities.Reasoning.Control != ReasoningControlFixed {
+		t.Fatalf("capabilities = %#v", model.Capabilities)
+	}
+}
+
 func TestModelNormalizesOpenRouterReasoningMetadata(t *testing.T) {
 	var model Model
 	if err := json.Unmarshal([]byte(`{"id":"a","reasoning":{"supported_efforts":["high","medium","low","minimal"],"default_effort":"medium","mandatory":true}}`), &model); err != nil {
