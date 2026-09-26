@@ -36,6 +36,9 @@ type Message struct {
 	// ResponseOutput retains native Responses items for stateless replay. Chat
 	// requests and user-facing message archives never serialize these items.
 	ResponseOutput []json.RawMessage `json:"-"`
+	// ResponseModel identifies the model that produced ResponseOutput. Native
+	// output must only be replayed to the same model.
+	ResponseModel string `json:"-"`
 }
 
 // MessageContentPart retains provider-specific multimodal and cache-control
