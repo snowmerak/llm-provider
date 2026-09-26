@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"slices"
 	"sync"
 	"testing"
@@ -243,6 +244,121 @@ func TestChatAdaptsCodexProtocol(t *testing.T) {
 	}
 	if err := <-serverErr; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestChatForwardsImagesToCodex(t *testing.T) {
+	const imageURL = "data:image/png;base64,aW1hZ2U="
+	tests := []struct {
+		name        string
+		messages    []llmprovider.Message
+		wantHistory []any
+		wantInput   []any
+	}{
+		{
+			name: "mixed content and history",
+			messages: []llmprovider.Message{
+				{Role: llmprovider.RoleUser, ContentParts: []llmprovider.MessageContentPart{
+					{"type": "text", "text": "earlier "},
+					{"type": "image_url", "image_url": map[string]any{"url": imageURL}},
+					{"type": "text", "text": " question"},
+				}},
+				{Role: llmprovider.RoleAssistant, Content: "answer"},
+				{Role: llmprovider.RoleUser, ContentParts: []llmprovider.MessageContentPart{
+					{"type": "text", "text": "first "},
+					{"type": "image_url", "image_url": map[string]any{"url": imageURL, "detail": "high"}},
+					{"type": "text", "text": " second"},
+					{"type": "image_url", "image_url": map[string]any{"url": "https://example.com/image.png"}},
+				}},
+			},
+			wantHistory: []any{
+				map[string]any{"type": "message", "role": "user", "content": []any{
+					map[string]any{"type": "input_text", "text": "earlier "},
+					map[string]any{"type": "input_image", "image_url": imageURL},
+					map[string]any{"type": "input_text", "text": " question"},
+				}},
+				map[string]any{"type": "message", "role": "assistant", "content": []any{
+					map[string]any{"type": "output_text", "text": "answer"},
+				}},
+			},
+			wantInput: []any{
+				map[string]any{"type": "text", "text": "first "},
+				map[string]any{"type": "image", "url": imageURL, "detail": "high"},
+				map[string]any{"type": "text", "text": " second"},
+				map[string]any{"type": "image", "url": "https://example.com/image.png"},
+			},
+		},
+		{
+			name: "image only",
+			messages: []llmprovider.Message{{Role: llmprovider.RoleUser, ContentParts: []llmprovider.MessageContentPart{
+				{"type": "input_image", "image_url": imageURL},
+			}}},
+			wantInput: []any{map[string]any{"type": "image", "url": imageURL}},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fake := newFakeTransport()
+			provider := New(func(config *config) {
+				config.transportFactoryForTest = func() (transport, error) { return fake, nil }
+			})
+			defer provider.Close()
+			serverErr := make(chan error, 1)
+			go func() {
+				var history, input []any
+				for {
+					select {
+					case data := <-fake.writes:
+						var request struct {
+							ID     int64          `json:"id"`
+							Method string         `json:"method"`
+							Params map[string]any `json:"params"`
+						}
+						if err := json.Unmarshal(data, &request); err != nil {
+							serverErr <- err
+							return
+						}
+						switch request.Method {
+						case "initialize":
+							fake.send(map[string]any{"id": request.ID, "result": map[string]any{}})
+						case "initialized":
+						case "thread/start":
+							fake.send(map[string]any{"id": request.ID, "result": map[string]any{"thread": map[string]any{"id": "thread_1"}}})
+						case "thread/inject_items":
+							history, _ = request.Params["items"].([]any)
+							fake.send(map[string]any{"id": request.ID, "result": map[string]any{}})
+						case "turn/start":
+							input, _ = request.Params["input"].([]any)
+							fake.send(map[string]any{"id": request.ID, "result": map[string]any{"turn": map[string]any{"id": "turn_1"}}})
+							fake.send(map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": "thread_1", "turn": map[string]any{"id": "turn_1", "status": "completed"}}})
+							if !reflect.DeepEqual(history, test.wantHistory) || !reflect.DeepEqual(input, test.wantInput) {
+								serverErr <- fmt.Errorf("history = %#v, input = %#v", history, input)
+							} else {
+								serverErr <- nil
+							}
+							return
+						default:
+							serverErr <- fmt.Errorf("unexpected method %q", request.Method)
+							return
+						}
+					case <-time.After(5 * time.Second):
+						serverErr <- errors.New("timed out waiting for Codex request")
+						return
+					}
+				}
+			}()
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			_, err := llmprovider.NewWithProvider(provider).Chat(ctx, llmprovider.ChatRequest{
+				Model: "test-model", Messages: test.messages,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := <-serverErr; err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 

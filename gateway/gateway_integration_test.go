@@ -1,9 +1,14 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -109,6 +114,104 @@ func TestIntegrationCodexChatEndpoint(t *testing.T) {
 	if completion.ConversationID == "" || len(completion.Choices) == 0 ||
 		!strings.Contains(completion.Choices[0].Message.Content, "CODEX_GATEWAY_OK_913") {
 		t.Fatalf("completion = %s", data)
+	}
+}
+
+func TestIntegrationCodexImageEndpoint(t *testing.T) {
+	if os.Getenv("GATEWAY_CODEX_IMAGE_INTEGRATION") == "" {
+		t.Skip("set GATEWAY_CODEX_IMAGE_INTEGRATION=1 to send an image through Gateway to Codex")
+	}
+	model := os.Getenv("CODEX_APP_SERVER_INTEGRATION_MODEL")
+	if model == "" {
+		model = "gpt-5.6-luna"
+	}
+	instance, err := New(Config{Providers: []ProviderConfig{{
+		ID: "codex", Type: "codex-app-server", Prefix: "codex", Enabled: true, Models: []string{model},
+		Codex: CodexConfig{Model: model},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = instance.Close() })
+	server := httptest.NewServer(instance.Handler())
+	defer server.Close()
+
+	picture := image.NewRGBA(image.Rect(0, 0, 64, 64))
+	for y := 0; y < 64; y++ {
+		for x := 0; x < 64; x++ {
+			picture.Set(x, y, color.RGBA{R: 255, A: 255})
+		}
+	}
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, picture); err != nil {
+		t.Fatal(err)
+	}
+	imageURL := "data:image/png;base64," + base64.StdEncoding.EncodeToString(encoded.Bytes())
+	requestBody, err := json.Marshal(llmprovider.ChatRequest{
+		Model: "codex/" + model,
+		Messages: []llmprovider.Message{{Role: llmprovider.RoleUser, ContentParts: []llmprovider.MessageContentPart{
+			{"type": "text", "text": "What color fills this image? Reply with one color name."},
+			{"type": "image_url", "image_url": map[string]any{"url": imageURL}},
+		}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Timeout: 2 * time.Minute}
+	chatResponse, err := client.Post(server.URL+"/v1/chat/completions", "application/json", bytes.NewReader(requestBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(chatResponse.Body)
+	_ = chatResponse.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chatResponse.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d: %s", chatResponse.StatusCode, data)
+	}
+	var completion llmprovider.ChatResponse
+	if err := json.Unmarshal(data, &completion); err != nil {
+		t.Fatal(err)
+	}
+	if len(completion.Choices) == 0 || !strings.Contains(strings.ToLower(completion.Choices[0].Message.Content), "red") {
+		t.Fatalf("image response = %s", data)
+	}
+	responsesBody, err := json.Marshal(map[string]any{
+		"model": "codex/" + model,
+		"input": []any{map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "input_text", "text": "What color fills this image? Reply with one color name."},
+			map[string]any{"type": "input_image", "image_url": imageURL},
+		}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	responsesResponse, err := client.Post(server.URL+"/v1/responses", "application/json", bytes.NewReader(responsesBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err = io.ReadAll(responsesResponse.Body)
+	_ = responsesResponse.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if responsesResponse.StatusCode != http.StatusOK {
+		t.Fatalf("responses status = %d: %s", responsesResponse.StatusCode, data)
+	}
+	var adapted struct {
+		Output []struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"output"`
+	}
+	if err := json.Unmarshal(data, &adapted); err != nil {
+		t.Fatal(err)
+	}
+	if len(adapted.Output) == 0 || len(adapted.Output[0].Content) == 0 ||
+		!strings.Contains(strings.ToLower(adapted.Output[0].Content[0].Text), "red") {
+		t.Fatalf("responses image result = %s", data)
 	}
 }
 

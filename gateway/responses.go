@@ -176,13 +176,61 @@ func responseInputMessages(input any) ([]llmprovider.Message, error) {
 		if role == "" {
 			role = llmprovider.RoleUser
 		}
-		content, err := responseContentText(item["content"])
+		content, parts, err := responseMessageContent(item["content"])
 		if err != nil {
 			return nil, fmt.Errorf("%s input content: %w", role, err)
 		}
-		messages = append(messages, llmprovider.Message{Role: role, Content: content})
+		messages = append(messages, llmprovider.Message{Role: role, Content: content, ContentParts: parts})
 	}
 	return messages, nil
+}
+
+func responseMessageContent(content any) (string, []llmprovider.MessageContentPart, error) {
+	parts, ok := content.([]any)
+	if !ok {
+		text, err := responseContentText(content)
+		return text, nil, err
+	}
+	var text strings.Builder
+	messageParts := make([]llmprovider.MessageContentPart, 0, len(parts))
+	hasImage := false
+	for _, value := range parts {
+		part, ok := value.(map[string]any)
+		if !ok {
+			return "", nil, errors.New("content part must be an object")
+		}
+		typeName, _ := part["type"].(string)
+		switch typeName {
+		case "input_text", "text", "output_text":
+			value, _ := part["text"].(string)
+			text.WriteString(value)
+			messageParts = append(messageParts, llmprovider.MessageContentPart{"type": "text", "text": value})
+		case "input_image":
+			var image llmprovider.MessageContentPart
+			if url, ok := part["image_url"].(string); ok && url != "" {
+				imageURL := map[string]any{"url": url}
+				if detail, ok := part["detail"]; ok {
+					imageURL["detail"] = detail
+				}
+				image = llmprovider.MessageContentPart{"type": "image_url", "image_url": imageURL}
+			} else if fileID, ok := part["file_id"].(string); ok && fileID != "" {
+				image = llmprovider.MessageContentPart{"type": "input_image", "file_id": fileID}
+				if detail, ok := part["detail"]; ok {
+					image["detail"] = detail
+				}
+			} else {
+				return "", nil, errors.New("input_image requires image_url or file_id")
+			}
+			messageParts = append(messageParts, image)
+			hasImage = true
+		default:
+			return "", nil, fmt.Errorf("content type %q is not supported by the chat adapter", typeName)
+		}
+	}
+	if !hasImage {
+		return text.String(), nil, nil
+	}
+	return text.String(), messageParts, nil
 }
 
 func responseContentText(content any) (string, error) {

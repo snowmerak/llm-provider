@@ -238,6 +238,14 @@ func (p *Provider) ChatStream(ctx context.Context, request llmprovider.ChatReque
 	if !toolResultContinuation && lastUser != len(request.Messages)-1 {
 		return nil, errors.New("codex: the last message must have the user role")
 	}
+	var input []map[string]any
+	if lastUser >= 0 {
+		var err error
+		input, err = turnInput(request.Messages[lastUser])
+		if err != nil {
+			return nil, err
+		}
+	}
 	if err := p.ensureStarted(ctx); err != nil {
 		return nil, err
 	}
@@ -278,18 +286,15 @@ func (p *Provider) ChatStream(ctx context.Context, request llmprovider.ChatReque
 		return nil, err
 	}
 	var history []llmprovider.Message
-	var turnInput string
 	if lastUser >= 0 {
 		history = request.Messages[:lastUser]
-		turnInput = request.Messages[lastUser].TextContent()
 	}
 	if toolResultContinuation {
 		if lastUser == len(request.Messages)-1 {
 			history = request.Messages[:lastUser]
-			turnInput = request.Messages[lastUser].TextContent()
 		} else {
 			history = request.Messages
-			turnInput = "Continue the response using the supplied function result."
+			input = []map[string]any{{"type": "text", "text": "Continue the response using the supplied function result."}}
 		}
 	}
 	if isNew {
@@ -312,7 +317,7 @@ func (p *Provider) ChatStream(ctx context.Context, request llmprovider.ChatReque
 
 	params := map[string]any{
 		"threadId": threadID,
-		"input":    []map[string]any{{"type": "text", "text": turnInput}},
+		"input":    input,
 	}
 	if model := firstNonEmpty(request.Model, p.config.model); model != "" {
 		params["model"] = model
@@ -632,17 +637,18 @@ func (p *Provider) injectHistory(ctx context.Context, threadID string, messages 
 			continue
 		}
 		role := string(message.Role)
-		contentType := "input_text"
-		if message.Role == llmprovider.RoleAssistant {
-			contentType = "output_text"
-		} else if message.Role != llmprovider.RoleUser {
+		if message.Role != llmprovider.RoleAssistant && message.Role != llmprovider.RoleUser {
 			role = "user"
 		}
-		if text := message.TextContent(); text != "" {
+		content, err := historyContent(message)
+		if err != nil {
+			return err
+		}
+		if len(content) > 0 {
 			items = append(items, map[string]any{
 				"type":    "message",
 				"role":    role,
-				"content": []map[string]any{{"type": contentType, "text": text}},
+				"content": content,
 			})
 		}
 		for _, call := range message.ToolCalls {

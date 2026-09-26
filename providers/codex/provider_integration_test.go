@@ -1,7 +1,12 @@
 package codex
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
+	"image"
+	"image/color"
+	"image/png"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -97,6 +102,40 @@ func TestIntegrationChat(t *testing.T) {
 	}
 	if response.ConversationID == "" {
 		t.Fatal("response has no conversation ID")
+	}
+}
+
+func TestIntegrationImage(t *testing.T) {
+	if os.Getenv("CODEX_APP_SERVER_IMAGE_INTEGRATION") == "" {
+		t.Skip("set CODEX_APP_SERVER_IMAGE_INTEGRATION=1 to run a real Codex image turn")
+	}
+	picture := image.NewRGBA(image.Rect(0, 0, 64, 64))
+	for y := 0; y < 64; y++ {
+		for x := 0; x < 64; x++ {
+			picture.Set(x, y, color.RGBA{R: 255, A: 255})
+		}
+	}
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, picture); err != nil {
+		t.Fatal(err)
+	}
+	imageURL := "data:image/png;base64," + base64.StdEncoding.EncodeToString(encoded.Bytes())
+	provider := integrationProvider()
+	t.Cleanup(func() { _ = provider.Close() })
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
+	defer cancel()
+	response, err := provider.Chat(ctx, llmprovider.ChatRequest{Messages: []llmprovider.Message{{
+		Role: llmprovider.RoleUser,
+		ContentParts: []llmprovider.MessageContentPart{
+			{"type": "text", "text": "What color fills this image? Reply with one color name."},
+			{"type": "image_url", "image_url": map[string]any{"url": imageURL}},
+		},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.ToLower(response.Choices[0].Message.Content), "red") {
+		t.Fatalf("image response = %q", response.Choices[0].Message.Content)
 	}
 }
 

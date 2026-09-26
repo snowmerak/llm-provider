@@ -931,6 +931,34 @@ func TestResponsesChatAdapterCommonSubset(t *testing.T) {
 	}
 }
 
+func TestResponsesChatAdapterPreservesImages(t *testing.T) {
+	const imageURL = "data:image/png;base64,aW1hZ2U="
+	chat, err := responseToChat(responseRequest{Input: []any{map[string]any{
+		"role": "user", "content": []any{
+			map[string]any{"type": "input_text", "text": "inspect "},
+			map[string]any{"type": "input_image", "image_url": imageURL, "detail": "high"},
+			map[string]any{"type": "input_text", "text": "this"},
+		},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := chat.Messages[0]
+	if len(message.ContentParts) != 3 {
+		t.Fatalf("image message = %#v", message)
+	}
+	image := message.ContentParts[1]["image_url"].(map[string]any)
+	if message.TextContent() != "inspect this" || message.ContentParts[1]["type"] != "image_url" ||
+		image["url"] != imageURL || image["detail"] != "high" {
+		t.Fatalf("image message = %#v", message)
+	}
+	if _, err := responseToChat(responseRequest{Input: []any{map[string]any{
+		"role": "user", "content": []any{map[string]any{"type": "input_image"}},
+	}}}); err == nil {
+		t.Fatal("input_image without image_url or file_id was accepted")
+	}
+}
+
 func TestDecodeChatRequestReasoningEffort(t *testing.T) {
 	request, stream, err := decodeChatRequest(strings.NewReader(
 		`{"model":"codex/model","messages":[{"role":"user","content":"hello"}],"reasoning_effort":"high","reasoning":{"enabled":true}}`,
