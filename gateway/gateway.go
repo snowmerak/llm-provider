@@ -52,6 +52,7 @@ type route struct {
 	modelMetadata           map[string]llmprovider.ModelMetadata
 	modelCapabilityProfile  string
 	cacheAffinityConfigured bool
+	responseCacheConfigured bool
 	forwardHeaders          map[string]struct{}
 	forwardResponseHeaders  map[string]struct{}
 	modelMu                 sync.RWMutex
@@ -116,6 +117,7 @@ func NewContext(ctx context.Context, config Config) (*Gateway, error) {
 			modelMetadata:           cloneModelMetadata(providerConfig.ModelMetadata),
 			modelCapabilityProfile:  modelCapabilityProfile,
 			cacheAffinityConfigured: providerCacheAffinityConfigured(providerConfig, providerKind),
+			responseCacheConfigured: providerResponseCacheConfigured(providerConfig, providerKind),
 			forwardHeaders:          headerSet(append(defaultRequestHeaders, providerConfig.ForwardHeaders...)),
 			forwardResponseHeaders:  headerSet(append(defaultResponseHeaders, providerConfig.ForwardResponseHeaders...)),
 		}

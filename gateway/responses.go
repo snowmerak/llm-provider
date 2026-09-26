@@ -53,7 +53,13 @@ func (g *Gateway) handleResponses(writer http.ResponseWriter, request *http.Requ
 		writeError(writer, http.StatusBadRequest, err)
 		return
 	}
+	backendBody, err = prepareResponseCache(route, backendBody)
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err)
+		return
+	}
 	headers := selectedHeaders(request.Header, route.forwardHeaders)
+	headers.Del("X-Q-Require-Native-Responses")
 	if native, ok := route.provider.(llmprovider.ResponsesProvider); ok {
 		if decoded.Stream {
 			g.streamNativeResponse(writer, request.Context(), route, native, backendBody, headers, externalModel)
@@ -66,6 +72,10 @@ func (g *Gateway) handleResponses(writer http.ResponseWriter, request *http.Requ
 		}
 		copySelectedHeaders(writer.Header(), response.Headers, route.forwardResponseHeaders)
 		writeRawJSON(writer, http.StatusOK, rewriteTopLevelModel(response.Body, externalModel))
+		return
+	}
+	if request.Header.Get("X-Q-Require-Native-Responses") == "true" {
+		writeError(writer, http.StatusBadRequest, fmt.Errorf("model %q does not support native Responses", externalModel))
 		return
 	}
 
@@ -87,6 +97,37 @@ func (g *Gateway) handleResponses(writer http.ResponseWriter, request *http.Requ
 	}
 	copySelectedHeaders(writer.Header(), chatResponse.Headers, route.forwardResponseHeaders)
 	writeJSON(writer, http.StatusOK, buildResponseObject(externalModel, decoded, chatResponse))
+}
+
+// cache_affinity_id is a Gateway-only extension. It never reaches the
+// upstream Responses API, including when a provider has no cache mechanism.
+func prepareResponseCache(route *route, body []byte) ([]byte, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil {
+		return nil, fmt.Errorf("decode responses request: %w", err)
+	}
+	var affinity string
+	if raw, found := fields["cache_affinity_id"]; found {
+		if err := json.Unmarshal(raw, &affinity); err != nil {
+			return nil, errors.New("cache_affinity_id must be a string")
+		}
+		delete(fields, "cache_affinity_id")
+	}
+	if affinity != "" && !route.responseCacheConfigured {
+		key := ""
+		switch promptCacheMechanism(route) {
+		case "openai", "grok":
+			key = "prompt_cache_key"
+		case "openrouter":
+			key = "session_id"
+		}
+		if key != "" {
+			if _, explicit := fields[key]; !explicit {
+				fields[key], _ = json.Marshal(affinity)
+			}
+		}
+	}
+	return json.Marshal(fields)
 }
 
 func decodeResponseRequest(reader io.Reader) ([]byte, responseRequest, error) {

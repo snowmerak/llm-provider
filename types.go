@@ -33,6 +33,9 @@ type Message struct {
 	Name         string               `json:"name,omitempty"`
 	ToolCallID   string               `json:"tool_call_id,omitempty"`
 	ToolCalls    []ToolCall           `json:"tool_calls,omitempty"`
+	// ResponseOutput retains native Responses items for stateless replay. Chat
+	// requests and user-facing message archives never serialize these items.
+	ResponseOutput []json.RawMessage `json:"-"`
 }
 
 // MessageContentPart retains provider-specific multimodal and cache-control

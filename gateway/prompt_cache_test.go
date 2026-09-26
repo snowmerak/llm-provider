@@ -1,12 +1,56 @@
 package gateway
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
 
 	llmprovider "github.com/snowmerak/llm-provider"
 )
+
+func TestPrepareResponseCacheMapsAndStripsGatewayAffinity(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		route *route
+		key   string
+	}{
+		{"openai", &route{providerType: "openai-compatible"}, "prompt_cache_key"},
+		{"openrouter", &route{providerType: "openrouter"}, "session_id"},
+		{"xai", &route{providerType: "openai-compatible", modelCapabilityProfile: "xai"}, "prompt_cache_key"},
+		{"codex", &route{providerType: "codex"}, ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body, err := prepareResponseCache(test.route, []byte(`{"model":"m","input":"hi","cache_affinity_id":"cache_test"}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]any
+			if err := json.Unmarshal(body, &fields); err != nil {
+				t.Fatal(err)
+			}
+			if _, found := fields["cache_affinity_id"]; found {
+				t.Fatalf("Gateway field leaked: %#v", fields)
+			}
+			if test.key != "" && fields[test.key] != "cache_test" {
+				t.Fatalf("affinity = %#v", fields)
+			}
+		})
+	}
+	for _, body := range []string{
+		`{"model":"m","input":"hi","cache_affinity_id":"cache_auto","prompt_cache_key":"explicit"}`,
+	} {
+		prepared, err := prepareResponseCache(&route{providerType: "openai-compatible"}, []byte(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]any
+		_ = json.Unmarshal(prepared, &fields)
+		if fields["prompt_cache_key"] != "explicit" {
+			t.Fatalf("explicit cache key overwritten: %#v", fields)
+		}
+	}
+}
 
 func TestPreparePromptCacheMapsConversationAffinity(t *testing.T) {
 	tests := []struct {

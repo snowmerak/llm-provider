@@ -102,6 +102,20 @@ func providerCacheAffinityConfigured(config ProviderConfig, providerKind string)
 	}
 }
 
+func providerResponseCacheConfigured(config ProviderConfig, providerKind string) bool {
+	mechanism := promptCacheMechanism(&route{providerType: config.Type, providerKind: providerKind})
+	switch mechanism {
+	case "openai", "grok":
+		_, configured := config.Body["prompt_cache_key"]
+		return configured
+	case "openrouter":
+		_, configured := config.Body["session_id"]
+		return configured || headerValue(config.Headers, "X-Session-Id") != ""
+	default:
+		return false
+	}
+}
+
 func requestCacheAffinityConfigured(mechanism string, request llmprovider.ChatRequest) bool {
 	switch mechanism {
 	case "openai":

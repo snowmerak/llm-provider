@@ -931,6 +931,29 @@ func TestResponsesChatAdapterCommonSubset(t *testing.T) {
 	}
 }
 
+func TestResponsesNativeRequirementRejectsChatAdapter(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/models" && request.URL.Path != "/v1/models" {
+			t.Errorf("unexpected adapted upstream request: %s", request.URL.Path)
+		}
+	}))
+	defer upstream.Close()
+	gateway, err := New(Config{Providers: []ProviderConfig{{
+		ID: "claude", Type: "anthropic", Enabled: true, BaseURL: upstream.URL, APIKey: "test", Models: []string{"model"},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = gateway.Close() })
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"claude/model","input":"hello"}`))
+	request.Header.Set("X-Q-Require-Native-Responses", "true")
+	response := httptest.NewRecorder()
+	gateway.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "does not support native Responses") {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
 func TestResponsesChatAdapterPreservesImages(t *testing.T) {
 	const imageURL = "data:image/png;base64,aW1hZ2U="
 	chat, err := responseToChat(responseRequest{Input: []any{map[string]any{
