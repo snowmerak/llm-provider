@@ -43,20 +43,21 @@ const (
 )
 
 type route struct {
-	id                      string
-	prefix                  string
-	providerType            string
-	providerKind            string
-	provider                llmprovider.Provider
-	models                  []string
-	modelMetadata           map[string]llmprovider.ModelMetadata
-	modelCapabilityProfile  string
-	cacheAffinityConfigured bool
-	responseCacheConfigured bool
-	forwardHeaders          map[string]struct{}
-	forwardResponseHeaders  map[string]struct{}
-	modelMu                 sync.RWMutex
-	cachedModels            []llmprovider.Model
+	id                             string
+	prefix                         string
+	providerType                   string
+	providerKind                   string
+	provider                       llmprovider.Provider
+	models                         []string
+	modelMetadata                  map[string]llmprovider.ModelMetadata
+	modelCapabilityProfile         string
+	cacheAffinityConfigured        bool
+	responseCacheConfigured        bool
+	responseCacheControlConfigured bool
+	forwardHeaders                 map[string]struct{}
+	forwardResponseHeaders         map[string]struct{}
+	modelMu                        sync.RWMutex
+	cachedModels                   []llmprovider.Model
 }
 
 type Gateway struct {
@@ -113,13 +114,14 @@ func NewContext(ctx context.Context, config Config) (*Gateway, error) {
 		modelCapabilityProfile := providerModelCapabilityProfile(providerConfig)
 		route := &route{
 			id: providerConfig.ID, prefix: prefix, providerType: providerConfig.Type, providerKind: providerKind, provider: provider,
-			models:                  append([]string(nil), providerConfig.Models...),
-			modelMetadata:           cloneModelMetadata(providerConfig.ModelMetadata),
-			modelCapabilityProfile:  modelCapabilityProfile,
-			cacheAffinityConfigured: providerCacheAffinityConfigured(providerConfig, providerKind),
-			responseCacheConfigured: providerResponseCacheConfigured(providerConfig, providerKind),
-			forwardHeaders:          headerSet(append(defaultRequestHeaders, providerConfig.ForwardHeaders...)),
-			forwardResponseHeaders:  headerSet(append(defaultResponseHeaders, providerConfig.ForwardResponseHeaders...)),
+			models:                         append([]string(nil), providerConfig.Models...),
+			modelMetadata:                  cloneModelMetadata(providerConfig.ModelMetadata),
+			modelCapabilityProfile:         modelCapabilityProfile,
+			cacheAffinityConfigured:        providerCacheAffinityConfigured(providerConfig, providerKind),
+			responseCacheConfigured:        providerResponseCacheConfigured(providerConfig, providerKind),
+			responseCacheControlConfigured: providerHasResponseCacheControl(providerConfig),
+			forwardHeaders:                 headerSet(append(defaultRequestHeaders, providerConfig.ForwardHeaders...)),
+			forwardResponseHeaders:         headerSet(append(defaultResponseHeaders, providerConfig.ForwardResponseHeaders...)),
 		}
 		gateway.routes[prefix] = route
 		gateway.order = append(gateway.order, route)

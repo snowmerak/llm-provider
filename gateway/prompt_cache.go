@@ -116,6 +116,11 @@ func providerResponseCacheConfigured(config ProviderConfig, providerKind string)
 	}
 }
 
+func providerHasResponseCacheControl(config ProviderConfig) bool {
+	_, configured := config.Body["cache_control"]
+	return configured
+}
+
 func requestCacheAffinityConfigured(mechanism string, request llmprovider.ChatRequest) bool {
 	switch mechanism {
 	case "openai":

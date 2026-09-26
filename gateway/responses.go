@@ -127,6 +127,14 @@ func prepareResponseCache(route *route, body []byte) ([]byte, error) {
 			}
 		}
 	}
+	if promptCacheMechanism(route) == "openrouter" && !route.responseCacheControlConfigured {
+		var model string
+		if err := json.Unmarshal(fields["model"], &model); err == nil && strings.HasPrefix(model, "anthropic/claude-") {
+			if _, explicit := fields["cache_control"]; !explicit {
+				fields["cache_control"] = json.RawMessage(`{"type":"ephemeral"}`)
+			}
+		}
+	}
 	return json.Marshal(fields)
 }
 

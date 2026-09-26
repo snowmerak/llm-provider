@@ -52,6 +52,39 @@ func TestPrepareResponseCacheMapsAndStripsGatewayAffinity(t *testing.T) {
 	}
 }
 
+func TestPrepareResponseCacheEnablesOpenRouterClaudeCaching(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		route       *route
+		body        string
+		wantControl bool
+		wantType    string
+	}{
+		{"Claude default", &route{providerType: "openrouter"}, `{"model":"anthropic/claude-haiku-4.5","input":"hi"}`, true, "ephemeral"},
+		{"explicit request", &route{providerType: "openrouter"}, `{"model":"anthropic/claude-haiku-4.5","input":"hi","cache_control":{"type":"ephemeral","ttl":"1h"}}`, true, "ephemeral"},
+		{"provider configured", &route{providerType: "openrouter", responseCacheControlConfigured: true}, `{"model":"anthropic/claude-haiku-4.5","input":"hi"}`, false, ""},
+		{"other model", &route{providerType: "openrouter"}, `{"model":"openai/gpt-5-nano","input":"hi"}`, false, ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			prepared, err := prepareResponseCache(test.route, []byte(test.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]any
+			if err := json.Unmarshal(prepared, &fields); err != nil {
+				t.Fatal(err)
+			}
+			control, found := fields["cache_control"].(map[string]any)
+			if found != test.wantControl || (found && control["type"] != test.wantType) {
+				t.Fatalf("cache_control = %#v", fields["cache_control"])
+			}
+			if test.name == "explicit request" && control["ttl"] != "1h" {
+				t.Fatalf("request cache TTL was overwritten: %#v", control)
+			}
+		})
+	}
+}
+
 func TestPreparePromptCacheMapsConversationAffinity(t *testing.T) {
 	tests := []struct {
 		name       string
