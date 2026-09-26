@@ -61,7 +61,7 @@ func TestMinimalThreadStartParamsCanBeOverridden(t *testing.T) {
 			{Role: llmprovider.RoleUser, Content: "Hello"},
 		},
 	}
-	params := provider.newThreadStartParams(request, dynamicTools, true)
+	params := provider.newThreadStartParams(request, dynamicTools, true, nil)
 
 	if params["baseInstructions"] != "Compact base instructions." {
 		t.Fatalf("baseInstructions = %#v", params["baseInstructions"])
@@ -96,7 +96,7 @@ func TestMinimalThreadStartParamsCanBeOverridden(t *testing.T) {
 	}
 
 	config["features.plugins"] = true
-	second := provider.newThreadStartParams(request, dynamicTools, true)
+	second := provider.newThreadStartParams(request, dynamicTools, true, nil)
 	if second["config"].(map[string]any)["features.plugins"] != false {
 		t.Fatal("thread/start config was mutated through returned params")
 	}
@@ -104,10 +104,86 @@ func TestMinimalThreadStartParamsCanBeOverridden(t *testing.T) {
 
 func TestEmptyBaseInstructionsAreForwarded(t *testing.T) {
 	provider := New(WithBaseInstructions(""))
-	params := provider.newThreadStartParams(llmprovider.ChatRequest{}, nil, false)
+	params := provider.newThreadStartParams(llmprovider.ChatRequest{}, nil, false, nil)
 	value, exists := params["baseInstructions"]
 	if !exists || value != "" {
 		t.Fatalf("baseInstructions = %#v, exists = %v", value, exists)
+	}
+}
+
+func TestMinimalThreadConfigDisablesConfiguredMCPServers(t *testing.T) {
+	config := minimalThreadConfig([]string{"node_repl", "custom.server"})
+	if config["mcp_servers.node_repl.enabled"] != false ||
+		config[`mcp_servers."custom.server".enabled`] != false {
+		t.Fatalf("minimal MCP overrides = %#v", config)
+	}
+	provider := New(WithThreadStartParams(map[string]any{"config": map[string]any{
+		"mcp_servers.node_repl.enabled": true,
+	}}))
+	params := provider.newThreadStartParams(llmprovider.ChatRequest{}, nil, false, []string{"node_repl", "other"})
+	got := params["config"].(map[string]any)
+	if got["mcp_servers.node_repl.enabled"] != true || got["mcp_servers.other.enabled"] != false {
+		t.Fatalf("explicit MCP override was not preserved: %#v", got)
+	}
+}
+
+func TestMinimalThreadDisablesInheritedMCPOnStartAndResume(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		conversationID string
+		method         string
+	}{
+		{name: "start", method: "thread/start"},
+		{name: "resume", conversationID: "thread_1", method: "thread/resume"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fake := newFakeTransport()
+			fake.mcpServerNames = []string{"node_repl", "openaiDeveloperDocs"}
+			provider := New(func(cfg *config) {
+				cfg.transportFactoryForTest = func() (transport, error) { return fake, nil }
+			})
+			defer provider.Close()
+			serverErr := make(chan error, 1)
+			go func() {
+				for data := range fake.writes {
+					var request struct {
+						ID     int64          `json:"id"`
+						Method string         `json:"method"`
+						Params map[string]any `json:"params"`
+					}
+					if err := json.Unmarshal(data, &request); err != nil {
+						serverErr <- err
+						return
+					}
+					switch request.Method {
+					case "initialize":
+						fake.send(map[string]any{"id": request.ID, "result": map[string]any{}})
+					case "initialized":
+					case test.method:
+						settings, ok := request.Params["config"].(map[string]any)
+						if !ok || settings["mcp_servers.node_repl.enabled"] != false ||
+							settings["mcp_servers.openaiDeveloperDocs.enabled"] != false {
+							serverErr <- fmt.Errorf("inherited MCP servers were not disabled: %#v", request.Params["config"])
+							return
+						}
+						fake.send(map[string]any{"id": request.ID, "result": map[string]any{"thread": map[string]any{"id": "thread_1"}}})
+						serverErr <- nil
+						return
+					default:
+						serverErr <- fmt.Errorf("unexpected method %q", request.Method)
+						return
+					}
+				}
+			}()
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			if _, _, err := provider.prepareThread(ctx, llmprovider.ChatRequest{Model: "test-model", ConversationID: test.conversationID}); err != nil {
+				t.Fatal(err)
+			}
+			if err := <-serverErr; err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 
@@ -159,10 +235,11 @@ func TestListModelsPreservesContextLength(t *testing.T) {
 }
 
 type fakeTransport struct {
-	reads     chan []byte
-	writes    chan []byte
-	closed    chan struct{}
-	closeOnce sync.Once
+	reads          chan []byte
+	writes         chan []byte
+	closed         chan struct{}
+	closeOnce      sync.Once
+	mcpServerNames []string
 }
 
 func newFakeTransport() *fakeTransport {
@@ -183,6 +260,20 @@ func (t *fakeTransport) ReadMessage() ([]byte, error) {
 }
 
 func (t *fakeTransport) WriteMessage(message []byte) error {
+	var request struct {
+		ID     int64  `json:"id"`
+		Method string `json:"method"`
+	}
+	if json.Unmarshal(message, &request) == nil && request.Method == "config/read" {
+		servers := make(map[string]any, len(t.mcpServerNames))
+		for _, name := range t.mcpServerNames {
+			servers[name] = map[string]any{}
+		}
+		t.send(map[string]any{"id": request.ID, "result": map[string]any{
+			"config": map[string]any{"mcp_servers": servers},
+		}})
+		return nil
+	}
 	select {
 	case t.writes <- append([]byte(nil), message...):
 		return nil

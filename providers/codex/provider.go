@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -393,6 +394,19 @@ func (p *Provider) prepareThread(ctx context.Context, request llmprovider.ChatRe
 		p.mu.Unlock()
 		if !loaded || includeTools {
 			params := map[string]any{"threadId": request.ConversationID}
+			if p.config.minimal && !loaded {
+				serverNames, err := p.configuredMCPServerNames(ctx, firstNonEmpty(request.WorkingDirectory, p.config.cwd))
+				if err != nil {
+					return "", false, err
+				}
+				config := minimalThreadConfig(serverNames)
+				if overrides, ok := p.config.threadStartParams["config"].(map[string]any); ok {
+					for key, value := range overrides {
+						config[key] = cloneValue(value)
+					}
+				}
+				params["config"] = config
+			}
 			if includeTools {
 				params["dynamicTools"] = dynamicTools
 			}
@@ -410,7 +424,14 @@ func (p *Provider) prepareThread(ctx context.Context, request llmprovider.ChatRe
 		return request.ConversationID, false, nil
 	}
 
-	params := p.newThreadStartParams(request, dynamicTools, includeTools)
+	var serverNames []string
+	if p.config.minimal {
+		serverNames, err = p.configuredMCPServerNames(ctx, firstNonEmpty(request.WorkingDirectory, p.config.cwd))
+		if err != nil {
+			return "", false, err
+		}
+	}
+	params := p.newThreadStartParams(request, dynamicTools, includeTools, serverNames)
 	var response threadResponse
 	if err := p.Call(ctx, "thread/start", params, &response); err != nil {
 		return "", false, err
@@ -428,6 +449,7 @@ func (p *Provider) newThreadStartParams(
 	request llmprovider.ChatRequest,
 	dynamicTools []map[string]any,
 	includeTools bool,
+	mcpServerNames []string,
 ) map[string]any {
 	params := map[string]any{
 		"approvalPolicy": string(p.config.approvalPolicy),
@@ -436,7 +458,7 @@ func (p *Provider) newThreadStartParams(
 	}
 	if p.config.minimal {
 		params["baseInstructions"] = ""
-		params["config"] = minimalThreadConfig()
+		params["config"] = minimalThreadConfig(mcpServerNames)
 		if p.config.experimentalAPI {
 			params["environments"] = []any{}
 		}
@@ -463,8 +485,8 @@ func (p *Provider) newThreadStartParams(
 	return params
 }
 
-func minimalThreadConfig() map[string]any {
-	return map[string]any{
+func minimalThreadConfig(mcpServerNames []string) map[string]any {
+	config := map[string]any{
 		"include_permissions_instructions":        false,
 		"include_apps_instructions":               false,
 		"include_collaboration_mode_instructions": false,
@@ -489,6 +511,46 @@ func minimalThreadConfig() map[string]any {
 		"features.unified_exec":                   false,
 		"web_search":                              "disabled",
 	}
+	for _, name := range mcpServerNames {
+		if name != "" {
+			config["mcp_servers."+tomlPathSegment(name)+".enabled"] = false
+		}
+	}
+	return config
+}
+
+// configuredMCPServerNames reads the effective Codex configuration for this
+// workspace. Minimal threads must not inherit MCP tools from the user's Codex
+// installation because those calls bypass the caller's dynamic tool runtime.
+func (p *Provider) configuredMCPServerNames(ctx context.Context, cwd string) ([]string, error) {
+	params := map[string]any{}
+	if cwd != "" {
+		params["cwd"] = cwd
+	}
+	var response struct {
+		Config struct {
+			MCPServers map[string]json.RawMessage `json:"mcp_servers"`
+		} `json:"config"`
+	}
+	if err := p.Call(ctx, "config/read", params, &response); err != nil {
+		return nil, fmt.Errorf("codex: read MCP configuration for minimal thread: %w", err)
+	}
+	names := make([]string, 0, len(response.Config.MCPServers))
+	for name := range response.Config.MCPServers {
+		names = append(names, name)
+	}
+	return names, nil
+}
+
+func tomlPathSegment(name string) string {
+	for _, character := range name {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') || character == '_' || character == '-' {
+			continue
+		}
+		return strconv.Quote(name)
+	}
+	return name
 }
 
 func mergeThreadStartParams(params, overrides map[string]any) {

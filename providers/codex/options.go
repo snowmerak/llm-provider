@@ -92,14 +92,15 @@ func WithBaseInstructions(instructions string) Option {
 	}
 }
 
-// WithMinimal keeps the default minimal Codex prompt mode enabled. Caller
-// supplied dynamic tools and conversation continuity remain available.
+// WithMinimal keeps the default minimal Codex agent mode enabled. It disables
+// inherited MCP servers while retaining caller-supplied dynamic tools and
+// conversation continuity.
 func WithMinimal() Option {
 	return WithMinimalEnabled(true)
 }
 
-// WithMinimalEnabled controls minimal Codex prompt mode. Minimal mode is on by
-// default; pass false only when the full Codex agent prompt is required.
+// WithMinimalEnabled controls minimal Codex agent mode. Minimal mode is on by
+// default; pass false only when the full Codex agent is required.
 func WithMinimalEnabled(enabled bool) Option {
 	return func(c *config) { c.minimal = enabled }
 }

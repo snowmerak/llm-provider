@@ -588,8 +588,10 @@ Minimal prompt mode is enabled by default. It keeps Codex transport and thread
 continuity while clearing the built-in base instructions, disabling skill, app,
 collaboration, permission, and environment instructions, disabling the main
 optional agent features, and starting the thread without a default execution
-environment. Caller-supplied dynamic tools remain available. Starting without
-a default execution environment requires the experimental API capability,
+environment. It also disables MCP servers inherited from the effective Codex
+configuration for the working directory, so their tools do not bypass the
+caller's dynamic tool runtime. Caller-supplied dynamic tools remain available.
+Starting without a default execution environment requires the experimental API capability,
 which this provider enables by default. Use `WithFullPrompt()` or Gateway
 `"minimal": false` only to opt into the full Codex agent prompt.
 
@@ -603,7 +605,7 @@ provider := codex.New(
     codex.WithModel("gpt-5.6-sol"),
     codex.WithThreadStartParams(map[string]any{
         "config": map[string]any{
-            "mcp_servers.openaiDeveloperDocs.enabled": false,
+            "mcp_servers.openaiDeveloperDocs.enabled": true,
         },
     }),
 )
@@ -625,7 +627,7 @@ The equivalent Gateway configuration is:
     "minimal": true,
     "thread_start": {
       "config": {
-        "mcp_servers.openaiDeveloperDocs.enabled": false
+        "mcp_servers.openaiDeveloperDocs.enabled": true
       }
     }
   }
