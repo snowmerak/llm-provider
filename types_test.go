@@ -24,6 +24,24 @@ func TestChatChunkPreservesChoicePhaseOnWire(t *testing.T) {
 	}
 }
 
+func TestMessagePhaseDoesNotChangeChatWireFormat(t *testing.T) {
+	message := Message{Role: RoleAssistant, Phase: "final_answer", Content: "answer"}
+	data, err := json.Marshal(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(data, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if _, found := wire["phase"]; found {
+		t.Fatalf("Chat message includes Responses phase: %s", data)
+	}
+	if wire["role"] != "assistant" || wire["content"] != "answer" {
+		t.Fatalf("Chat message = %s", data)
+	}
+}
+
 func TestModelNormalizesContextLengthAliases(t *testing.T) {
 	tests := []struct {
 		name string

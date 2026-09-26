@@ -24,6 +24,9 @@ const (
 // Message is the common text-message subset supported by all providers.
 type Message struct {
 	Role Role `json:"role"`
+	// Phase distinguishes intermediate commentary from a final answer when
+	// reconstructing Responses history. Chat wire messages omit this field.
+	Phase string `json:"-"`
 	// Content is the common text form. ContentParts preserves structured
 	// OpenAI-compatible content blocks, including provider cache breakpoints.
 	// When ContentParts is non-empty it is encoded as the content field instead
@@ -77,7 +80,7 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &wire); err != nil {
 		return err
 	}
-	m.Role, m.Name, m.ToolCallID, m.ToolCalls = wire.Role, wire.Name, wire.ToolCallID, wire.ToolCalls
+	m.Role, m.Phase, m.Name, m.ToolCallID, m.ToolCalls = wire.Role, "", wire.Name, wire.ToolCallID, wire.ToolCalls
 	m.Content, m.ContentParts = "", nil
 	if len(wire.Content) == 0 || string(wire.Content) == "null" {
 		return nil
