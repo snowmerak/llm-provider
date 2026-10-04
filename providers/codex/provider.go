@@ -232,7 +232,9 @@ func (p *Provider) Chat(ctx context.Context, request llmprovider.ChatRequest) (*
 func (p *Provider) ChatStream(ctx context.Context, request llmprovider.ChatRequest) (llmprovider.Stream, error) {
 	lastUser := lastUserMessage(request.Messages)
 	hasToolResults := containsToolResult(request.Messages)
-	toolResultContinuation := hasToolResults && request.ToolHandler == nil
+	// Historical tool results belong to earlier turns. A trailing user message
+	// starts a new turn on the existing thread, not a delegated-tool continuation.
+	toolResultContinuation := hasToolResults && request.ToolHandler == nil && lastUser != len(request.Messages)-1
 	if lastUser < 0 && !toolResultContinuation {
 		return nil, errors.New("codex: at least one user message is required")
 	}
@@ -291,12 +293,8 @@ func (p *Provider) ChatStream(ctx context.Context, request llmprovider.ChatReque
 		history = request.Messages[:lastUser]
 	}
 	if toolResultContinuation {
-		if lastUser == len(request.Messages)-1 {
-			history = request.Messages[:lastUser]
-		} else {
-			history = request.Messages
-			input = []map[string]any{{"type": "text", "text": "Continue the response using the supplied function result."}}
-		}
+		history = request.Messages
+		input = []map[string]any{{"type": "text", "text": "Continue the response using the supplied function result."}}
 	}
 	if isNew {
 		if err := p.injectHistory(ctx, threadID, history); err != nil {
