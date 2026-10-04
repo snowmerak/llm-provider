@@ -180,10 +180,11 @@ metadata are also retained. Providers whose model catalog does not advertise
 reasoning capabilities can supply them through `model_metadata`. The
 `xai`/`grok` provider profile fills the documented Grok effort levels even
 though xAI's model-list response does not include them.
-Codex `model/list` currently has no context-window field;
-after the first turn, the Gateway learns the effective value from
-`thread/tokenUsage/updated` and includes it in later model responses unless
-configuration overrides it.
+Codex `model/list` currently has no context-window field. Until a turn supplies
+the effective `modelContextWindow` through `thread/tokenUsage/updated`, the
+adapter uses a conservative 256,000-token fallback (128,000 for luna models).
+The server-reported value replaces that fallback in later model responses;
+explicit `model_metadata` configuration takes precedence over both.
 
 ### Chat Completions
 
@@ -579,6 +580,13 @@ provider := codex.New(
 client := llmprovider.New(provider)
 defer client.Close()
 ```
+
+New conversations use `thread/start`; subsequent requests on the same loaded
+thread use `turn/start` directly. This also retains ephemeral threads throughout
+the App Server process lifetime. Only unloaded conversations use `thread/resume`.
+Dynamic tools are registered on `thread/start` and restored from stored metadata
+on resume; the current resume protocol cannot replace the tool catalog. Start a
+new conversation to change its dynamic tool definitions.
 
 System and developer messages become `developerInstructions` on a new Codex
 thread. Earlier user, assistant, and tool messages are inserted through

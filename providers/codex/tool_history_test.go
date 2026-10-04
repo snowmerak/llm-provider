@@ -33,6 +33,9 @@ func TestChatNewUserAfterToolHistoryReusesThread(t *testing.T) {
 					}
 					assistant := llmprovider.Message{Role: llmprovider.RoleAssistant, Content: "Done"}
 					request := llmprovider.ChatRequest{Model: "test-model", ConversationID: "existing-thread", Messages: history}
+					request.Tools = []llmprovider.Tool{{Type: llmprovider.ToolTypeFunction, Function: llmprovider.FunctionDefinition{
+						Name: toolName, Parameters: map[string]any{"type": "object", "properties": map[string]any{}},
+					}}}
 					if inferred {
 						provider.saveConversationCheckpoint(request, assistant, "existing-thread", "previous-turn")
 						request.ConversationID = ""
@@ -89,8 +92,20 @@ func serveNewUserAfterToolHistory(ctx context.Context, fake *fakeTransport, want
 				fake.send(map[string]any{"id": request.ID, "result": map[string]any{}})
 			case "initialized":
 			case "thread/resume":
+				if _, exists := request.Params["dynamicTools"]; exists {
+					fake.send(map[string]any{"id": request.ID, "error": map[string]any{
+						"code": -32602, "message": "unsupported dynamicTools on thread/resume",
+					}})
+					return fmt.Errorf("thread/resume does not support dynamicTools: %#v", request.Params)
+				}
+				if _, exists := request.Params["ephemeral"]; exists {
+					return fmt.Errorf("thread/resume does not support ephemeral: %#v", request.Params)
+				}
 				if request.Params["threadId"] != "existing-thread" {
 					return fmt.Errorf("resumed wrong thread: %#v", request.Params)
+				}
+				if request.Params["excludeTurns"] != true {
+					return fmt.Errorf("resume should not hydrate unused history: %#v", request.Params)
 				}
 				fake.send(map[string]any{"id": request.ID, "result": map[string]any{
 					"thread": map[string]any{"id": "existing-thread"},

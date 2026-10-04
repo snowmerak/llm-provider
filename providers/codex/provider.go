@@ -136,6 +136,9 @@ func (p *Provider) ListModels(ctx context.Context) ([]llmprovider.Model, error) 
 				if runtime := p.modelMetadata(id); runtime.ContextLength > 0 {
 					contextLength = runtime.ContextLength
 				}
+				if contextLength <= 0 {
+					contextLength = fallbackContextLength(id)
+				}
 				var capabilities *llmprovider.ModelCapabilities
 				if len(reasoningEfforts) > 0 || model.DefaultReasoningEffort != "" {
 					capabilities = &llmprovider.ModelCapabilities{Reasoning: &llmprovider.ReasoningCapabilities{
@@ -155,6 +158,15 @@ func (p *Provider) ListModels(ctx context.Context) ([]llmprovider.Model, error) 
 		cursor = *response.NextCursor
 	}
 	return models, nil
+}
+
+// model/list does not currently advertise context windows. Use conservative
+// defaults until thread/tokenUsage/updated supplies the effective window.
+func fallbackContextLength(model string) int64 {
+	if strings.Contains(strings.ToLower(model), "luna") {
+		return 128000
+	}
+	return 256000
 }
 
 func (p *Provider) modelMetadata(model string) llmprovider.ModelMetadata {
@@ -390,9 +402,13 @@ func (p *Provider) prepareThread(ctx context.Context, request llmprovider.ChatRe
 		p.mu.Lock()
 		loaded := p.loaded[request.ConversationID]
 		p.mu.Unlock()
-		if !loaded || includeTools {
-			params := map[string]any{"threadId": request.ConversationID}
-			if p.config.minimal && !loaded {
+		// thread/start and thread/resume subscribe this connection to the thread.
+		// A loaded thread needs only turn/start, including for ephemeral threads
+		// that have no rollout to reopen. Dynamic tools are registered at start;
+		// thread/resume does not support updating their catalog.
+		if !loaded {
+			params := map[string]any{"threadId": request.ConversationID, "excludeTurns": true}
+			if p.config.minimal {
 				serverNames, err := p.configuredMCPServerNames(ctx, firstNonEmpty(request.WorkingDirectory, p.config.cwd))
 				if err != nil {
 					return "", false, err
@@ -404,9 +420,6 @@ func (p *Provider) prepareThread(ctx context.Context, request llmprovider.ChatRe
 					}
 				}
 				params["config"] = config
-			}
-			if includeTools {
-				params["dynamicTools"] = dynamicTools
 			}
 			var response threadResponse
 			if err := p.Call(ctx, "thread/resume", params, &response); err != nil {
@@ -961,6 +974,9 @@ func (p *Provider) handleNotification(method string, params json.RawMessage) {
 	}
 	_ = json.Unmarshal(params, &ids)
 	p.mu.Lock()
+	if method == "thread/closed" {
+		delete(p.loaded, ids.ThreadID)
+	}
 	state := p.turns[ids.TurnID]
 	if state == nil {
 		state = p.active[ids.ThreadID]
@@ -974,6 +990,9 @@ func (p *Provider) handleNotification(method string, params json.RawMessage) {
 	}
 
 	switch method {
+	case "thread/closed":
+		p.removeTurn(state)
+		state.finish(errors.New("codex: thread closed during an active turn"))
 	case "item/agentMessage/delta":
 		var event struct {
 			Delta  string `json:"delta"`

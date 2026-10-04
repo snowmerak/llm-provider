@@ -105,6 +105,60 @@ func TestIntegrationChat(t *testing.T) {
 	}
 }
 
+func TestIntegrationEphemeralThreadWithToolsContinuity(t *testing.T) {
+	if os.Getenv("CODEX_APP_SERVER_CONTINUITY_INTEGRATION") == "" {
+		t.Skip("set CODEX_APP_SERVER_CONTINUITY_INTEGRATION=1 to test real ephemeral thread continuity")
+	}
+	provider := integrationProvider()
+	defer provider.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
+	defer cancel()
+	var calls atomic.Int64
+	request := llmprovider.ChatRequest{
+		ReasoningEffort: "low",
+		Tools: []llmprovider.Tool{{Type: llmprovider.ToolTypeFunction, Function: llmprovider.FunctionDefinition{
+			Name: "get_marker", Description: "Return the marker requested by the user.",
+			Parameters: map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false},
+		}}},
+		ToolHandler: func(context.Context, llmprovider.ToolCall) (llmprovider.ToolResult, error) {
+			calls.Add(1)
+			return llmprovider.ToolResult{Content: `{"marker":"STABLE_TULIP47"}`}, nil
+		},
+	}
+	var threadID string
+	for index, prompt := range []string{
+		"Call get_marker, remember the returned marker, and reply with only the marker.",
+		"Without calling tools, reply with the marker from the previous turn.",
+		"Again, without calling tools, reply with that same marker.",
+	} {
+		request.Messages = append(request.Messages, llmprovider.Message{Role: llmprovider.RoleUser, Content: prompt})
+		response, err := provider.Chat(ctx, request)
+		if err != nil {
+			t.Fatalf("turn %d: %v", index+1, err)
+		}
+		if threadID == "" {
+			threadID = response.ConversationID
+		}
+		if threadID == "" || response.ConversationID != threadID {
+			t.Fatalf("turn %d changed thread from %q to %q", index+1, threadID, response.ConversationID)
+		}
+		if len(response.Choices) != 1 || !strings.Contains(response.Choices[0].Message.Content, "STABLE_TULIP47") {
+			t.Fatalf("turn %d did not retain the marker: %#v", index+1, response)
+		}
+		cached := 0
+		if response.Usage.PromptDetails != nil {
+			cached = response.Usage.PromptDetails.CachedTokens
+		}
+		t.Logf("turn=%d thread=%s input=%d cached=%d output=%d", index+1, threadID,
+			response.Usage.PromptTokens, cached, response.Usage.CompletionTokens)
+		request.ConversationID = threadID
+		request.Messages = append(request.Messages, response.Choices[0].Message)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("dynamic tool calls = %d, want exactly one", calls.Load())
+	}
+}
+
 func TestIntegrationImage(t *testing.T) {
 	if os.Getenv("CODEX_APP_SERVER_IMAGE_INTEGRATION") == "" {
 		t.Skip("set CODEX_APP_SERVER_IMAGE_INTEGRATION=1 to run a real Codex image turn")
