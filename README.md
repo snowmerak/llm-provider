@@ -8,6 +8,7 @@ It currently supports:
 - OpenAI-compatible APIs, including local servers, OpenRouter, and xAI/Grok
 - Anthropic Claude through the native Messages API
 - a local `codex app-server --listen stdio://` process
+- [Sign in with ChatGPT](./providers/chatgpt/README.md) through the public Responses API
 - model listing and model metadata lookup
 - regular and SSE-streaming Chat Completions
 - native or adapted Responses API requests, including SSE streaming

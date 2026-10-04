@@ -14,6 +14,7 @@ import (
 
 	llmprovider "github.com/snowmerak/llm-provider"
 	"github.com/snowmerak/llm-provider/providers/anthropic"
+	"github.com/snowmerak/llm-provider/providers/chatgpt"
 	"github.com/snowmerak/llm-provider/providers/codex"
 	"github.com/snowmerak/llm-provider/providers/openai"
 )
@@ -58,6 +59,7 @@ type route struct {
 	forwardResponseHeaders         map[string]struct{}
 	modelMu                        sync.RWMutex
 	cachedModels                   []llmprovider.Model
+	authProfile                    string
 }
 
 type Gateway struct {
@@ -178,6 +180,8 @@ func modelCacheSettings(config Config) (time.Duration, time.Duration, error) {
 
 func buildProvider(config ProviderConfig) (llmprovider.Provider, error) {
 	switch config.Type {
+	case "chatgpt":
+		return chatgpt.New(chatgpt.Options{Directory: config.ChatGPT.Directory, AppID: config.ChatGPT.AppID, AppName: config.ChatGPT.AppName})
 	case "anthropic", "claude":
 		apiKey := config.APIKey
 		if config.APIKeyEnv != "" {
@@ -312,9 +316,27 @@ func buildProvider(config ProviderConfig) (llmprovider.Provider, error) {
 func (g *Gateway) Models(ctx context.Context) ([]llmprovider.Model, error) {
 	models := make([]llmprovider.Model, 0)
 	for _, route := range g.order {
+		if provider, ok := route.provider.(*chatgpt.Provider); ok {
+			if status, err := provider.Status(ctx); err == nil {
+				g.syncChatGPTModels(ctx, route, status)
+			}
+		}
 		models = append(models, route.modelsFromCache()...)
 	}
 	return models, nil
+}
+
+// WaitForAuthentication drains sign-in transactions after HTTP requests have
+// stopped reaching this Gateway, before closing a retired generation.
+func (g *Gateway) WaitForAuthentication(ctx context.Context) error {
+	for _, entry := range g.order {
+		if waiter, ok := entry.provider.(interface{ WaitForLogin(context.Context) error }); ok {
+			if err := waiter.WaitForLogin(ctx); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // Model returns the OpenAI-compatible model object for a prefixed model ID.
@@ -398,6 +420,8 @@ func effectiveProviderKind(config ProviderConfig) string {
 		return "anthropic"
 	case "codex", "codex-app-server":
 		return "codex"
+	case "chatgpt":
+		return "chatgpt"
 	case "openai-compatible":
 		if config.BaseURL != "" {
 			endpoint, err := url.Parse(config.BaseURL)

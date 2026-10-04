@@ -12,9 +12,10 @@ import (
 var errRuntimeClosed = errors.New("gateway runtime is closed")
 
 type gatewayGeneration struct {
-	gateway  *gateway.Gateway
-	handler  http.Handler
-	requests sync.WaitGroup
+	gateway            *gateway.Gateway
+	handler            http.Handler
+	requests           sync.WaitGroup
+	waitAuthentication func(context.Context) error
 }
 
 // gatewayRuntime pins each request to the Gateway generation it starts on.
@@ -65,7 +66,12 @@ func (r *gatewayRuntime) Reload(ctx context.Context, config gateway.Config) (boo
 	r.current = replacementGeneration
 	r.mu.Unlock()
 
-	return true, previous.close()
+	previous.requests.Wait()
+	var authErr error
+	if previous.waitAuthentication != nil {
+		authErr = previous.waitAuthentication(ctx)
+	}
+	return true, errors.Join(authErr, previous.close())
 }
 
 func (r *gatewayRuntime) Close() error {
@@ -85,7 +91,7 @@ func (r *gatewayRuntime) Close() error {
 }
 
 func newGatewayGeneration(instance *gateway.Gateway) *gatewayGeneration {
-	return &gatewayGeneration{gateway: instance, handler: instance.Handler()}
+	return &gatewayGeneration{gateway: instance, handler: instance.Handler(), waitAuthentication: instance.WaitForAuthentication}
 }
 
 func (g *gatewayGeneration) close() error {

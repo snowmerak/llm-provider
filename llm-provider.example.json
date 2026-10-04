@@ -4,6 +4,12 @@
   "model_cache_refresh_timeout": "10s",
   "providers": [
     {
+      "id": "chatgpt",
+      "type": "chatgpt",
+      "prefix": "chatgpt",
+      "enabled": false
+    },
+    {
       "id": "codex",
       "type": "codex-app-server",
       "prefix": "codex",

@@ -38,6 +38,15 @@ type ProviderConfig struct {
 	Models                 []string                             `json:"models,omitempty"`
 	ModelMetadata          map[string]llmprovider.ModelMetadata `json:"model_metadata,omitempty"`
 	Codex                  CodexConfig                          `json:"codex,omitempty"`
+	ChatGPT                ChatGPTConfig                        `json:"chatgpt,omitempty"`
+}
+
+// ChatGPTConfig contains application identity and a local storage location,
+// never credentials or host IDs. Library hosts should supply their own app.
+type ChatGPTConfig struct {
+	AppID     string `json:"app_id,omitempty"`
+	AppName   string `json:"app_name,omitempty"`
+	Directory string `json:"directory,omitempty"`
 }
 
 type CodexConfig struct {
@@ -97,6 +106,7 @@ func (c *Config) expandEnvironment() {
 		provider := &c.Providers[index]
 		provider.BaseURL = os.ExpandEnv(provider.BaseURL)
 		provider.APIKey = os.ExpandEnv(provider.APIKey)
+		provider.ChatGPT.Directory = os.ExpandEnv(provider.ChatGPT.Directory)
 		for key, value := range provider.Headers {
 			provider.Headers[key] = os.ExpandEnv(value)
 		}
@@ -160,7 +170,7 @@ func (p ProviderConfig) validate() error {
 		return fmt.Errorf("provider %q prefix %q contains '/'", p.ID, prefix)
 	}
 	switch p.Type {
-	case "anthropic", "claude", "codex", "codex-app-server", "grok", "xai", "openrouter", "openai-compatible":
+	case "anthropic", "claude", "codex", "codex-app-server", "grok", "xai", "openrouter", "openai-compatible", "chatgpt":
 	default:
 		return fmt.Errorf("provider %q has unsupported type %q", p.ID, p.Type)
 	}
@@ -173,6 +183,9 @@ func (p ProviderConfig) validate() error {
 	}
 	if p.Type == "openai-compatible" && p.BaseURL == "" {
 		return fmt.Errorf("provider %q requires base_url", p.ID)
+	}
+	if p.Type == "chatgpt" && (p.APIKey != "" || p.APIKeyEnv != "" || p.BaseURL != "") {
+		return fmt.Errorf("provider %q ChatGPT authentication uses its local account store, not base_url or api_key", p.ID)
 	}
 	if (p.Type == "grok" || p.Type == "xai") && p.APIKey == "" && p.APIKeyEnv == "" {
 		return fmt.Errorf("provider %q requires api_key or api_key_env", p.ID)
@@ -263,6 +276,8 @@ func canonicalProviderKind(kind string) (string, bool) {
 		return "anthropic", true
 	case "codex", "codex-app-server":
 		return "codex", true
+	case "chatgpt":
+		return "chatgpt", true
 	default:
 		return "", false
 	}

@@ -19,6 +19,8 @@ func (g *Gateway) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/chat/completions", g.handleChatCompletions)
 	mux.HandleFunc("POST /v1/responses", g.handleResponses)
 	mux.HandleFunc("POST /v1/embeddings", g.handleEmbeddings)
+	mux.HandleFunc("GET /v1/providers/{provider}/chatgpt", g.handleChatGPTAuth)
+	mux.HandleFunc("POST /v1/providers/{provider}/chatgpt/{action}", g.handleChatGPTAuth)
 	return mux
 }
 
