@@ -21,7 +21,7 @@ import (
 const (
 	defaultBaseURL          = "https://api.anthropic.com/v1"
 	defaultAnthropicVersion = "2023-06-01"
-	defaultMaxTokens        = 1024
+	defaultMaxTokens        = 65536
 )
 
 type config struct {

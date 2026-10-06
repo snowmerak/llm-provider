@@ -24,6 +24,9 @@ func TestChatMapsSystemToolsResultsAndCacheUsage(t *testing.T) {
 		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
+		if body["max_tokens"] != float64(65536) {
+			t.Fatalf("default max_tokens = %#v, want 65536", body["max_tokens"])
+		}
 		if body["output_config"].(map[string]any)["effort"] != "medium" {
 			t.Fatalf("reasoning effort = %#v", body["output_config"])
 		}
