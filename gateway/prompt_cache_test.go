@@ -322,3 +322,57 @@ func TestPreparePromptCacheLeavesCodexAlone(t *testing.T) {
 		}
 	}
 }
+
+func TestPreparePromptCacheAnthropicPolicy(t *testing.T) {
+	anthropicRoute := &route{providerType: "anthropic"}
+	for _, test := range []struct {
+		policy  string
+		wantTTL string
+	}{
+		{AnthropicCacheOneHour, "1h"},
+		{AnthropicCacheOff, ""},
+	} {
+		request := llmprovider.ChatRequest{ConversationID: "cache_previous", Extra: map[string]any{AnthropicCacheField: test.policy}}
+		prepared, id, err := preparePromptCache(anthropicRoute, request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if prepared.ConversationID != "" || (test.policy == AnthropicCacheOff && id != "") {
+			t.Fatalf("policy %q: request = %#v, id = %q", test.policy, prepared, id)
+		}
+		if _, leaked := prepared.Extra[AnthropicCacheField]; leaked {
+			t.Fatalf("Gateway extension leaked: %#v", prepared.Extra)
+		}
+		control, _ := prepared.Extra["cache_control"].(map[string]any)
+		if test.wantTTL == "" {
+			if _, configured := prepared.Extra["cache_control"]; configured {
+				t.Fatalf("off still has cache control: %#v", prepared.Extra)
+			}
+		} else if control["ttl"] != test.wantTTL || control["type"] != "ephemeral" {
+			t.Fatalf("policy %q: cache control = %#v", test.policy, control)
+		}
+	}
+	configured := &route{providerType: "anthropic", cacheAffinityConfigured: true}
+	prepared, _, err := preparePromptCache(configured, llmprovider.ChatRequest{Extra: map[string]any{AnthropicCacheField: AnthropicCacheOff}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value, present := prepared.Extra["cache_control"]; !present || value != nil {
+		t.Fatalf("provider cache default was not suppressed: %#v", prepared.Extra)
+	}
+}
+
+func TestPreparePromptCacheRejectsInvalidAnthropicPolicy(t *testing.T) {
+	for _, test := range []struct {
+		route   *route
+		request llmprovider.ChatRequest
+	}{
+		{&route{providerType: "openai-compatible"}, llmprovider.ChatRequest{Extra: map[string]any{AnthropicCacheField: AnthropicCacheOneHour}}},
+		{&route{providerType: "anthropic"}, llmprovider.ChatRequest{Extra: map[string]any{AnthropicCacheField: "2h"}}},
+		{&route{providerType: "anthropic"}, llmprovider.ChatRequest{Extra: map[string]any{AnthropicCacheField: AnthropicCacheOff, "cache_control": map[string]any{"type": "ephemeral"}}}},
+	} {
+		if _, _, err := preparePromptCache(test.route, test.request); err == nil {
+			t.Fatalf("accepted invalid policy: %#v", test.request)
+		}
+	}
+}

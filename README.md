@@ -376,6 +376,14 @@ take precedence. Gateway-generated IDs are never forwarded as an upstream
 stateful `conversation_id`. Codex continues to own `conversation_id` as its App
 Server thread ID.
 
+Native Anthropic Chat Completions requests can set the Gateway-only
+`q_anthropic_cache` field to `"1h"` or `"off"`. `"1h"` sends
+`cache_control: {"type":"ephemeral","ttl":"1h"}`; `"off"` omits Anthropic
+cache controls, including a provider-level `body.cache_control` default. The
+Gateway removes this field before the native Messages request. It rejects the
+field on other routes and rejects request-level cache controls that conflict
+with it. Omitting the field retains the normal Gateway cache behavior.
+
 `type` selects the transport implementation, while optional `kind` selects the
 backend semantics used for cache and known model capabilities. This matters
 when an intermediary exposes Grok through an OpenAI-compatible API:

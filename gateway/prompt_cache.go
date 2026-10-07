@@ -3,6 +3,7 @@ package gateway
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -11,6 +12,17 @@ import (
 )
 
 const gatewayCacheConversationPrefix = "cache_"
+
+// AnthropicCacheField is a Gateway-only Chat Completions extension. The Gateway
+// consumes it before forwarding the request to Anthropic.
+const AnthropicCacheField = "q_anthropic_cache"
+
+const (
+	AnthropicCacheOneHour = "1h"
+	AnthropicCacheOff     = "off"
+)
+
+var errAnthropicCachePolicy = errors.New("invalid Anthropic cache policy")
 
 // preparePromptCache gives HTTP providers the cache metadata appropriate to
 // their backend. Codex owns ConversationID as an App Server thread ID. For
@@ -28,6 +40,35 @@ func preparePromptCache(route *route, request llmprovider.ChatRequest) (llmprovi
 	}
 
 	mechanism := promptCacheMechanism(route)
+	if policyValue, configured := request.Extra[AnthropicCacheField]; configured {
+		if mechanism != "anthropic" {
+			return llmprovider.ChatRequest{}, "", fmt.Errorf("%w: %s requires an Anthropic route", errAnthropicCachePolicy, AnthropicCacheField)
+		}
+		policy, ok := policyValue.(string)
+		if !ok || (policy != AnthropicCacheOneHour && policy != AnthropicCacheOff) {
+			return llmprovider.ChatRequest{}, "", fmt.Errorf("%w: %s must be %q or %q", errAnthropicCachePolicy, AnthropicCacheField, AnthropicCacheOneHour, AnthropicCacheOff)
+		}
+		request.Extra = cloneAnyMap(request.Extra)
+		delete(request.Extra, AnthropicCacheField)
+		if policy == AnthropicCacheOff {
+			if hasAnthropicCacheBreakpoint(request) {
+				return llmprovider.ChatRequest{}, "", fmt.Errorf("%w: %s=%q conflicts with explicit Anthropic cache controls", errAnthropicCachePolicy, AnthropicCacheField, policy)
+			}
+			if route.cacheAffinityConfigured {
+				// A nil request override removes a provider-level default in the
+				// native Anthropic adapter before the request reaches the wire.
+				request.Extra["cache_control"] = nil
+			}
+			if len(request.Extra) == 0 {
+				request.Extra = nil
+			}
+			return request, "", nil
+		}
+		if hasAnthropicCacheBreakpoint(request) {
+			return llmprovider.ChatRequest{}, "", fmt.Errorf("%w: %s=%q conflicts with explicit Anthropic cache controls", errAnthropicCachePolicy, AnthropicCacheField, policy)
+		}
+		request.Extra["cache_control"] = map[string]any{"type": "ephemeral", "ttl": AnthropicCacheOneHour}
+	}
 	if mechanism == "" {
 		// A model group may move a conversation from a cached route to a route
 		// without automatic cache affinity. Do not treat its Gateway cache ID as
@@ -79,6 +120,23 @@ func preparePromptCache(route *route, request llmprovider.ChatRequest) (llmprovi
 		}
 	}
 	return request, conversationID, nil
+}
+
+func hasAnthropicCacheBreakpoint(request llmprovider.ChatRequest) bool {
+	if _, configured := request.Extra["cache_control"]; configured {
+		return true
+	}
+	for _, message := range request.Messages {
+		for _, part := range message.ContentParts {
+			if _, configured := part["cache_control"]; configured {
+				return true
+			}
+			if _, configured := part["prompt_cache_breakpoint"]; configured {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func providerCacheAffinityConfigured(config ProviderConfig, providerKind string) bool {

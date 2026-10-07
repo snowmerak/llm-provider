@@ -165,8 +165,8 @@ type ToolResult struct {
 // OpenAI tool_calls response shape.
 type ToolHandler func(context.Context, ToolCall) (ToolResult, error)
 
-// ChatRequest describes a chat completion. Extra fields are sent only by the
-// OpenAI-compatible provider and cannot override the typed fields.
+// ChatRequest describes a chat completion. Extra fields supply provider-specific
+// request fields for HTTP providers; typed fields take precedence where supported.
 type ChatRequest struct {
 	Model               string    `json:"model,omitempty"`
 	Messages            []Message `json:"messages"`

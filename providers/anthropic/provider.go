@@ -239,6 +239,10 @@ func (p *Provider) messagePayload(request llmprovider.ChatRequest, stream bool) 
 		payload[key] = value
 	}
 	for key, value := range request.Extra {
+		if key == "cache_control" && value == nil {
+			delete(payload, key)
+			continue
+		}
 		payload[key] = value
 	}
 	payload["model"] = request.Model

@@ -629,6 +629,61 @@ func TestAnthropicAutomaticCacheConversationPersistsAcrossRequests(t *testing.T)
 	}
 }
 
+func TestAnthropicCouncilCachePolicyReachesNativeMessages(t *testing.T) {
+	for _, providerDefault := range []bool{false, true} {
+		upstreamRequests := make(chan map[string]any, 3)
+		upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			switch request.URL.Path {
+			case "/v1/models":
+				_, _ = io.WriteString(writer, `{"data":[{"id":"backend","type":"model"}],"has_more":false}`)
+			case "/v1/messages":
+				var body map[string]any
+				if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+					t.Error(err)
+				}
+				upstreamRequests <- body
+				_, _ = io.WriteString(writer, `{"id":"msg_1","type":"message","role":"assistant","model":"backend","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":1}}`)
+			default:
+				http.NotFound(writer, request)
+			}
+		}))
+		config := ProviderConfig{ID: "claude", Type: "anthropic", Enabled: true, BaseURL: upstream.URL + "/v1", APIKey: "secret"}
+		if providerDefault {
+			config.Body = map[string]any{"cache_control": map[string]any{"type": "ephemeral"}}
+		}
+		gateway, err := New(Config{Providers: []ProviderConfig{config}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		server := httptest.NewServer(gateway.Handler())
+		for _, policy := range []string{AnthropicCacheOneHour, AnthropicCacheOff} {
+			body, _ := json.Marshal(map[string]any{
+				"model": "claude/backend", "messages": []any{map[string]any{"role": "user", "content": "hello"}},
+				AnthropicCacheField: policy,
+			})
+			response, err := http.Post(server.URL+"/v1/chat/completions", "application/json", bytes.NewReader(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = response.Body.Close()
+			if response.StatusCode != http.StatusOK {
+				t.Fatalf("policy %q with provider default %t: status = %d", policy, providerDefault, response.StatusCode)
+			}
+			upstreamBody := <-upstreamRequests
+			if _, leaked := upstreamBody[AnthropicCacheField]; leaked {
+				t.Fatalf("Gateway extension leaked upstream: %#v", upstreamBody)
+			}
+			control, present := upstreamBody["cache_control"].(map[string]any)
+			if policy == AnthropicCacheOff && present || policy == AnthropicCacheOneHour && (!present || control["ttl"] != "1h") {
+				t.Fatalf("policy %q with provider default %t: cache control = %#v", policy, providerDefault, upstreamBody["cache_control"])
+			}
+		}
+		server.Close()
+		_ = gateway.Close()
+		upstream.Close()
+	}
+}
+
 func TestLoadConfigExpandsEnvironment(t *testing.T) {
 	t.Setenv("TEST_GATEWAY_API_KEY", "expanded-secret")
 	t.Setenv("TEST_CACHE_KEY", "tenant:cache-v1")

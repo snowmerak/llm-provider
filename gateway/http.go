@@ -58,7 +58,11 @@ func (g *Gateway) handleChatCompletions(writer http.ResponseWriter, request *htt
 	chatRequest.Headers = selectedHeaders(request.Header, route.forwardHeaders)
 	chatRequest, cacheConversationID, err := preparePromptCache(route, chatRequest)
 	if err != nil {
-		writeError(writer, http.StatusInternalServerError, err)
+		status := http.StatusInternalServerError
+		if errors.Is(err, errAnthropicCachePolicy) {
+			status = http.StatusBadRequest
+		}
+		writeError(writer, status, err)
 		return
 	}
 	if stream {
