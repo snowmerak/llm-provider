@@ -673,8 +673,9 @@ func TestAnthropicCouncilCachePolicyReachesNativeMessages(t *testing.T) {
 			if _, leaked := upstreamBody[AnthropicCacheField]; leaked {
 				t.Fatalf("Gateway extension leaked upstream: %#v", upstreamBody)
 			}
-			control, present := upstreamBody["cache_control"].(map[string]any)
-			if policy == AnthropicCacheOff && present || policy == AnthropicCacheOneHour && (!present || control["ttl"] != "1h") {
+			controlValue, present := upstreamBody["cache_control"]
+			control, valid := controlValue.(map[string]any)
+			if policy == AnthropicCacheOff && present || policy == AnthropicCacheOneHour && (!valid || control["type"] != "ephemeral" || control["ttl"] != "1h") {
 				t.Fatalf("policy %q with provider default %t: cache control = %#v", policy, providerDefault, upstreamBody["cache_control"])
 			}
 		}
