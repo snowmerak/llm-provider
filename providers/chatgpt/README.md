@@ -90,7 +90,11 @@ mixing flat tools with an existing `functions` namespace is rejected.
 
 Unsupported plan fields (including output-token caps, temperature, top-p and
 HTTP `previous_response_id`) and hosted tools fail explicitly. Non-streaming
-callers receive the collected terminal response. EOF, failed/incomplete events,
+callers receive the terminal response combined with the final
+`response.output_item.done` snapshots. The terminal event can omit or truncate
+its output array; collection preserves the streamed text, function calls and
+opaque reasoning in output-index order without duplicating terminal items.
+EOF, failed/incomplete events,
 and usage-limit failures after partial output never count as completed inference.
 The selected account's public model catalog supplies model IDs and reasoning
 capabilities; account switching refreshes Gateway choices.
