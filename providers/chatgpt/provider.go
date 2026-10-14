@@ -206,6 +206,21 @@ func (p *Provider) CreateResponseStream(ctx context.Context, body json.RawMessag
 			delete(headers, key)
 		}
 	}
+	// Plan cache reuse also needs a stable session-id. Derive it from the
+	// caller's cache key so stateless requests keep the same session across
+	// turns and restarts, without changing other providers or caller headers.
+	var cache struct {
+		Key string `json:"prompt_cache_key"`
+	}
+	if err := json.Unmarshal(encoded, &cache); err != nil {
+		return nil, fmt.Errorf("chatgpt: decode prompt cache key: %w", err)
+	}
+	if cache.Key != "" && headers.Get("session-id") == "" {
+		if headers == nil {
+			headers = make(http.Header)
+		}
+		headers.Set("session-id", cache.Key)
+	}
 	stream, err := provider.CreateResponseStream(ctx, encoded, headers)
 	if err != nil {
 		return nil, err

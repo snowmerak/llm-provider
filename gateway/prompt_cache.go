@@ -92,7 +92,7 @@ func preparePromptCache(route *route, request llmprovider.ChatRequest) (llmprovi
 	}
 
 	switch mechanism {
-	case "openai":
+	case "openai", "chatgpt":
 		request.Extra = cloneAnyMap(request.Extra)
 		if _, configured := request.Extra["prompt_cache_key"]; !configured {
 			request.Extra["prompt_cache_key"] = conversationID
@@ -181,7 +181,7 @@ func providerHasResponseCacheControl(config ProviderConfig) bool {
 
 func requestCacheAffinityConfigured(mechanism string, request llmprovider.ChatRequest) bool {
 	switch mechanism {
-	case "openai":
+	case "openai", "chatgpt":
 		_, configured := request.Extra["prompt_cache_key"]
 		return configured
 	case "openrouter":
@@ -218,6 +218,8 @@ func promptCacheMechanism(route *route) string {
 		return "openai"
 	case "anthropic":
 		return "anthropic"
+	case "chatgpt":
+		return "chatgpt"
 	default:
 		return ""
 	}
@@ -242,6 +244,8 @@ func routeKind(route *route) string {
 		return "anthropic"
 	case "codex", "codex-app-server":
 		return "codex"
+	case "chatgpt":
+		return "chatgpt"
 	default:
 		return ""
 	}

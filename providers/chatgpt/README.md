@@ -99,6 +99,12 @@ items are preserved for replay. Failed and incomplete streams retain the server'
 error code, message and incomplete reason, and subsequent reads return EOF.
 The Chat-only `stream_options` field is not forwarded to Responses; completion
 events already supply usage without `stream_options.include_usage`.
+For ChatGPT routes, the Gateway uses conversation cache affinity as
+`prompt_cache_key` in both API modes. The ChatGPT adapter defaults the upstream
+`session-id` header to that key, preserving an explicit caller-supplied header.
+There is no process-global session ID and no new ID is generated for each turn;
+callers must retain their conversation affinity. Other providers do not receive
+this header automatically.
 EOF, failed/incomplete events,
 and usage-limit failures after partial output never count as completed inference.
 The selected account's public model catalog supplies model IDs and reasoning

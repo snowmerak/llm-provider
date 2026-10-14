@@ -19,6 +19,7 @@ func TestPrepareResponseCacheMapsAndStripsGatewayAffinity(t *testing.T) {
 		{"openrouter", &route{providerType: "openrouter"}, "session_id"},
 		{"xai", &route{providerType: "openai-compatible", modelCapabilityProfile: "xai"}, "prompt_cache_key"},
 		{"codex", &route{providerType: "codex"}, ""},
+		{"chatgpt", &route{providerType: "chatgpt"}, "prompt_cache_key"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			body, err := prepareResponseCache(test.route, []byte(`{"model":"m","input":"hi","cache_affinity_id":"cache_test"}`))
@@ -93,6 +94,7 @@ func TestPreparePromptCacheMapsConversationAffinity(t *testing.T) {
 		header     string
 	}{
 		{name: "OpenAI compatible", route: &route{providerType: "openai-compatible"}, extraField: "prompt_cache_key"},
+		{name: "ChatGPT", route: &route{providerType: "chatgpt"}, extraField: "prompt_cache_key"},
 		{name: "OpenRouter", route: &route{providerType: "openrouter"}, extraField: "session_id"},
 		{name: "Grok", route: &route{providerType: "grok"}, header: "X-Grok-Conv-Id"},
 		{name: "xAI compatible", route: &route{providerType: "openai-compatible", modelCapabilityProfile: "xai"}, header: "X-Grok-Conv-Id"},

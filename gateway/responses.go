@@ -116,7 +116,7 @@ func prepareResponseCache(route *route, body []byte) ([]byte, error) {
 	if affinity != "" && !route.responseCacheConfigured {
 		key := ""
 		switch promptCacheMechanism(route) {
-		case "openai", "grok":
+		case "openai", "grok", "chatgpt":
 			key = "prompt_cache_key"
 		case "openrouter":
 			key = "session_id"
