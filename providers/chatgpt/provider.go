@@ -152,7 +152,12 @@ func normalize(body json.RawMessage) (json.RawMessage, error) {
 			if hasFunctionsNamespace {
 				return nil, errors.New("chatgpt: flat tools collide with namespace functions")
 			}
-			normalized = append(normalized, map[string]any{"type": "namespace", "name": "functions", "tools": flat})
+			// Namespace descriptions are required by the Responses schema,
+			// independently of the descriptions on the contained tools.
+			normalized = append(normalized, map[string]any{
+				"type": "namespace", "name": "functions",
+				"description": "Client-provided tools executed by the application.", "tools": flat,
+			})
 			if choice, ok := fields["tool_choice"].(map[string]any); ok && choice["type"] == "function" {
 				if _, explicit := choice["namespace"]; !explicit {
 					choice["namespace"] = "functions"

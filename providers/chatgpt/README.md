@@ -84,7 +84,8 @@ owning application's originator or User-Agent.
 
 Each request uses `store:false`, `stream:true`, a full input array, and opaque
 reasoning replay. System messages become developer messages. Flat local tools
-are grouped under the `functions` namespace. Native namespaces are supported;
+are grouped under the `functions` namespace with its required description,
+separate from each child tool's description. Native namespaces are supported;
 mixing flat tools with an existing `functions` namespace is rejected.
 
 Unsupported plan fields (including output-token caps, temperature, top-p and
