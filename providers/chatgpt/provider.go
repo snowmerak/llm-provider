@@ -338,6 +338,11 @@ type responseStream struct {
 	completed bool
 }
 
+type responseErrorDetail struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
 func (s *responseStream) Close() error { return s.inner.Close() }
 func (s *responseStream) ResponseHeaders() http.Header {
 	if headers, ok := s.inner.(interface{ ResponseHeaders() http.Header }); ok {
@@ -357,13 +362,16 @@ func (s *responseStream) Recv() (*llmprovider.ResponseEvent, error) {
 		return nil, err
 	}
 	var value struct {
-		Type     string `json:"type"`
+		Type     string               `json:"type"`
+		Code     string               `json:"code"`
+		Message  string               `json:"message"`
+		Error    *responseErrorDetail `json:"error"`
 		Response struct {
-			Status string `json:"status"`
-			Error  *struct {
-				Code    string `json:"code"`
-				Message string `json:"message"`
-			} `json:"error"`
+			Status            string               `json:"status"`
+			Error             *responseErrorDetail `json:"error"`
+			IncompleteDetails *struct {
+				Reason string `json:"reason"`
+			} `json:"incomplete_details"`
 		} `json:"response"`
 	}
 	if err := json.Unmarshal(event.Data, &value); err != nil {
@@ -374,16 +382,31 @@ func (s *responseStream) Recv() (*llmprovider.ResponseEvent, error) {
 	}
 	switch value.Type {
 	case "response.completed":
+		s.completed = true
 		if value.Response.Status != "completed" {
 			return nil, errors.New("chatgpt: terminal response did not complete")
 		}
-		s.completed = true
 	case "response.failed", "response.incomplete", "error":
-		detail := value.Type
-		if value.Response.Error != nil {
-			detail += ": " + value.Response.Error.Code
+		s.completed = true
+		failure := value.Response.Error
+		if failure == nil {
+			failure = value.Error
 		}
-		return nil, errors.New("chatgpt: " + detail)
+		code, message := value.Code, value.Message
+		if failure != nil {
+			code, message = failure.Code, failure.Message
+		}
+		details := []string{value.Type}
+		if code != "" {
+			details = append(details, code)
+		}
+		if message != "" {
+			details = append(details, message)
+		}
+		if value.Response.IncompleteDetails != nil && value.Response.IncompleteDetails.Reason != "" {
+			details = append(details, value.Response.IncompleteDetails.Reason)
+		}
+		return nil, errors.New("chatgpt: " + strings.Join(details, ": "))
 	}
 	return event, nil
 }
@@ -394,6 +417,11 @@ func chatBody(request llmprovider.ChatRequest) (json.RawMessage, error) {
 	}
 	fields := make(map[string]any)
 	for key, value := range request.Extra {
+		// Chat's include_usage option is not a Responses option. Responses
+		// already reports usage in its completion event for both caller modes.
+		if key == "stream_options" {
+			continue
+		}
 		fields[key] = value
 	}
 	fields["model"] = request.Model
@@ -521,8 +549,9 @@ func responseChat(body json.RawMessage) (*llmprovider.ChatResponse, error) {
 			Name      string `json:"name"`
 			Arguments string `json:"arguments"`
 			Content   []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
+				Type    string `json:"type"`
+				Text    string `json:"text"`
+				Refusal string `json:"refusal"`
 			} `json:"content"`
 		}
 		if err := json.Unmarshal(raw, &item); err != nil {
@@ -533,8 +562,11 @@ func responseChat(body json.RawMessage) (*llmprovider.ChatResponse, error) {
 		}
 		if item.Type == "message" && item.Phase != "commentary" {
 			for _, part := range item.Content {
-				if part.Type == "output_text" {
+				switch part.Type {
+				case "output_text":
 					message.Content += part.Text
+				case "refusal":
+					message.Content += part.Refusal
 				}
 			}
 		}
@@ -579,6 +611,7 @@ type chatStream struct {
 	model     string
 	text      strings.Builder
 	phases    map[int]string
+	output    map[int]json.RawMessage
 	completed bool
 }
 
@@ -599,12 +632,10 @@ func (s *chatStream) Recv() (*llmprovider.ChatChunk, error) {
 			return nil, err
 		}
 		var value struct {
-			Type  string `json:"type"`
-			Delta string `json:"delta"`
-			Index int    `json:"output_index"`
-			Item  struct {
-				Phase string `json:"phase"`
-			} `json:"item"`
+			Type     string          `json:"type"`
+			Delta    string          `json:"delta"`
+			Index    *int            `json:"output_index"`
+			Item     json.RawMessage `json:"item"`
 			Response json.RawMessage `json:"response"`
 		}
 		if err := json.Unmarshal(event.Data, &value); err != nil {
@@ -613,17 +644,39 @@ func (s *chatStream) Recv() (*llmprovider.ChatChunk, error) {
 		if value.Type == "" {
 			value.Type = event.Event
 		}
+		index := 0
+		if value.Index != nil {
+			index = *value.Index
+		}
 		switch value.Type {
 		case "response.output_item.added":
-			s.phases[value.Index] = value.Item.Phase
-		case "response.output_text.delta":
-			phase := s.phases[value.Index]
+			var item struct {
+				Phase string `json:"phase"`
+			}
+			if err := json.Unmarshal(value.Item, &item); err != nil {
+				return nil, err
+			}
+			s.phases[index] = item.Phase
+		case "response.output_text.delta", "response.refusal.delta":
+			phase := s.phases[index]
 			if phase != "commentary" {
 				s.text.WriteString(value.Delta)
 			}
 			return &llmprovider.ChatChunk{Model: s.model, Choices: []llmprovider.Choice{{Phase: phase, Delta: &llmprovider.Message{Role: llmprovider.RoleAssistant, Content: value.Delta}}}}, nil
+		case "response.output_item.done":
+			if value.Index == nil || index < 0 || len(value.Item) == 0 || string(value.Item) == "null" {
+				return nil, errors.New("chatgpt: completed output item is missing its index or value")
+			}
+			if s.output == nil {
+				s.output = make(map[int]json.RawMessage)
+			}
+			s.output[index] = append(json.RawMessage(nil), value.Item...)
 		case "response.completed":
-			response, err := responseChat(value.Response)
+			body, err := collectResponseOutput(value.Response, s.output)
+			if err != nil {
+				return nil, err
+			}
+			response, err := responseChat(body)
 			if err != nil {
 				return nil, err
 			}

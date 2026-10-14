@@ -11,17 +11,25 @@ import (
 	llmprovider "github.com/snowmerak/llm-provider"
 )
 
-func TestNonStreamingResponseRetainsStreamedOutput(t *testing.T) {
+func TestResponseRetainsStreamedOutput(t *testing.T) {
 	items := []json.RawMessage{
 		json.RawMessage(`{"id":"rs-1","type":"reasoning","encrypted_content":"opaque"}`),
 		json.RawMessage(`{"id":"msg-1","type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Hello"}]}`),
 		json.RawMessage(`{"id":"fc-1","type":"function_call","call_id":"call-1","name":"lookup","namespace":"functions","arguments":"{}"}`),
 	}
 	for _, shape := range []string{"empty", "absent", "null", "partial", "complete"} {
-		for _, mode := range []string{"responses", "chat"} {
+		for _, mode := range []string{"responses", "chat", "chat-stream"} {
 			t.Run(shape+"/"+mode, func(t *testing.T) {
 				transport := &http.Client{Transport: roundTrip(func(r *http.Request) (*http.Response, error) {
+					var request map[string]any
+					if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+						return nil, err
+					}
+					if _, present := request["stream_options"]; present {
+						t.Error("Chat-only stream options leaked into the Responses request")
+					}
 					var events strings.Builder
+					_, _ = fmt.Fprint(&events, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"Hello\"}\n\n")
 					for index, item := range items {
 						_, _ = fmt.Fprintf(&events, "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"output_index\":%d,\"item\":%s}\n\n", index, item)
 					}
@@ -53,7 +61,8 @@ func TestNonStreamingResponseRetainsStreamedOutput(t *testing.T) {
 				}); err != nil {
 					t.Fatal(err)
 				}
-				if mode == "responses" {
+				switch mode {
+				case "responses":
 					response, err := p.CreateResponse(t.Context(), json.RawMessage(`{"model":"test","input":"hello"}`), nil)
 					if err != nil {
 						t.Fatal(err)
@@ -81,14 +90,46 @@ func TestNonStreamingResponseRetainsStreamedOutput(t *testing.T) {
 					if !strings.Contains(string(body.Output[0]), `"encrypted_content":"opaque"`) {
 						t.Fatal("opaque reasoning lost")
 					}
-				} else {
-					response, err := p.Chat(t.Context(), llmprovider.ChatRequest{Model: "test", Messages: []llmprovider.Message{{Role: llmprovider.RoleUser, Content: "hello"}}})
+				case "chat":
+					response, err := p.Chat(t.Context(), llmprovider.ChatRequest{Model: "test", Messages: []llmprovider.Message{{Role: llmprovider.RoleUser, Content: "hello"}}, Extra: map[string]any{"stream_options": map[string]any{"include_usage": true}}})
 					if err != nil {
 						t.Fatal(err)
 					}
 					message := response.Choices[0].Message
 					if message.Content != "Hello" || len(message.ToolCalls) != 1 || len(message.ResponseOutput) != 3 || response.Usage.TotalTokens != 5 {
 						t.Fatalf("lost chat output: %+v", response)
+					}
+				case "chat-stream":
+					stream, err := p.ChatStream(t.Context(), llmprovider.ChatRequest{Model: "test", Messages: []llmprovider.Message{{Role: llmprovider.RoleUser, Content: "hello"}}, Extra: map[string]any{"stream_options": map[string]any{"include_usage": true}}})
+					if err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(func() { _ = stream.Close() })
+					var text strings.Builder
+					var terminal *llmprovider.ChatChunk
+					for {
+						chunk, err := stream.Recv()
+						if err == io.EOF {
+							break
+						}
+						if err != nil {
+							t.Fatal(err)
+						}
+						for _, choice := range chunk.Choices {
+							if choice.Delta != nil {
+								text.WriteString(choice.Delta.Content)
+								if choice.FinishReason != "" {
+									terminal = chunk
+								}
+							}
+						}
+					}
+					if text.String() != "Hello" || terminal == nil || terminal.Usage == nil || terminal.Usage.TotalTokens != 5 {
+						t.Fatalf("lost or duplicated streamed text/usage: text=%q terminal=%+v", text.String(), terminal)
+					}
+					message := terminal.Choices[0].Delta
+					if len(message.ToolCalls) != 1 || len(message.ResponseOutput) != 3 || message.ResponseModel != "test" || !strings.Contains(string(message.ResponseOutput[0]), "opaque") {
+						t.Fatalf("lost native output or tool call: %+v", message)
 					}
 				}
 			})

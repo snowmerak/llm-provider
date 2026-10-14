@@ -90,10 +90,15 @@ mixing flat tools with an existing `functions` namespace is rejected.
 
 Unsupported plan fields (including output-token caps, temperature, top-p and
 HTTP `previous_response_id`) and hosted tools fail explicitly. Non-streaming
-callers receive the terminal response combined with the final
+Responses and both Chat caller modes combine the terminal response with the final
 `response.output_item.done` snapshots. The terminal event can omit or truncate
 its output array; collection preserves the streamed text, function calls and
 opaque reasoning in output-index order without duplicating terminal items.
+Refusal text and deltas remain visible assistant content, while native refusal
+items are preserved for replay. Failed and incomplete streams retain the server's
+error code, message and incomplete reason, and subsequent reads return EOF.
+The Chat-only `stream_options` field is not forwarded to Responses; completion
+events already supply usage without `stream_options.include_usage`.
 EOF, failed/incomplete events,
 and usage-limit failures after partial output never count as completed inference.
 The selected account's public model catalog supplies model IDs and reasoning
