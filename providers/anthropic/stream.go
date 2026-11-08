@@ -25,12 +25,15 @@ type sseStream struct {
 	usage   usageResponse
 	toolIDs map[int]string
 	tools   map[int]string
+	inputs  map[int]string
+	hasJSON map[int]bool
 }
 
 func newSSEStream(body io.ReadCloser, headers http.Header) *sseStream {
 	return &sseStream{
 		body: body, reader: bufio.NewReader(body), headers: headers,
 		toolIDs: make(map[int]string), tools: make(map[int]string),
+		inputs: make(map[int]string), hasJSON: make(map[int]bool),
 	}
 }
 
@@ -74,6 +77,7 @@ func (s *sseStream) Recv() (*llmprovider.ChatChunk, error) {
 				continue
 			}
 			s.toolIDs[value.Index], s.tools[value.Index] = value.ContentBlock.ID, value.ContentBlock.Name
+			s.inputs[value.Index] = string(value.ContentBlock.Input)
 			return s.chunk(&llmprovider.Message{
 				Role: llmprovider.RoleAssistant,
 				ToolCalls: []llmprovider.ToolCall{{
@@ -97,6 +101,9 @@ func (s *sseStream) Recv() (*llmprovider.ChatChunk, error) {
 			case "text_delta":
 				return s.chunk(&llmprovider.Message{Role: llmprovider.RoleAssistant, Content: value.Delta.Text}, "", nil), nil
 			case "input_json_delta":
+				if strings.TrimSpace(value.Delta.PartialJSON) != "" {
+					s.hasJSON[value.Index] = true
+				}
 				return s.chunk(&llmprovider.Message{
 					Role: llmprovider.RoleAssistant,
 					ToolCalls: []llmprovider.ToolCall{{
@@ -105,6 +112,26 @@ func (s *sseStream) Recv() (*llmprovider.ChatChunk, error) {
 					}},
 				}, "", nil), nil
 			}
+		case "content_block_stop":
+			var value struct {
+				Index int `json:"index"`
+			}
+			if err := json.Unmarshal(data, &value); err != nil {
+				return nil, fmt.Errorf("anthropic: decode content_block_stop: %w", err)
+			}
+			if _, tool := s.tools[value.Index]; !tool || s.hasJSON[value.Index] {
+				continue
+			}
+			// Empty-argument tools can send only an empty JSON delta. Use the
+			// initial input after the block finishes, never before a truncated call.
+			arguments := s.inputs[value.Index]
+			if arguments == "" || arguments == "null" {
+				arguments = "{}"
+			}
+			s.hasJSON[value.Index] = true
+			return s.chunk(&llmprovider.Message{Role: llmprovider.RoleAssistant,
+				ToolCalls: []llmprovider.ToolCall{{Index: value.Index, Function: llmprovider.FunctionCall{Arguments: arguments}}},
+			}, "", nil), nil
 		case "message_delta":
 			var value struct {
 				Delta struct {

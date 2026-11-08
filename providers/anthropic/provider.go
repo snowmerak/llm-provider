@@ -239,6 +239,11 @@ func (p *Provider) messagePayload(request llmprovider.ChatRequest, stream bool) 
 		payload[key] = value
 	}
 	for key, value := range request.Extra {
+		if key == "stream_options" {
+			// OpenAI-compatible callers request streamed usage with this field.
+			// Messages always emits usage and rejects the OpenAI-only option.
+			continue
+		}
 		if key == "cache_control" && value == nil {
 			delete(payload, key)
 			continue
